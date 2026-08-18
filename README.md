@@ -1,90 +1,221 @@
-# 同花顺harness
+# A 股 AI 辅助交易工作台
 
-同花顺风格股票终端 + AI Agent 工作区融合的 DeepSeek Harness（DSH）终端式前端。
+基于 [tonghuashun-webui](https://github.com/renat3u/tonghuashun-webui) 改造的本地工作台，当前 fork 为 [Kairos2425/tonghuashun-webui](https://github.com/Kairos2425/tonghuashun-webui)。项目面向股票新手，把行情、DeepSeek 研究、模拟交易、风险校验和国泰海通君弘实盘确认放在同一个界面中。
 
-**最终定位**：作为一个插件注入 DSH，替换 `dsh` 默认 Web 界面（独立运行 = 开发/演示模式，见下文「与 DSH 的集成路径」）。
+这不是无人值守交易程序，也不构成投资建议。当前最稳妥的实盘路径是：
 
-核心隐喻：**K 线图以股票行情展示 Token 消耗** —— 一次删掉 10,000 行死代码的大重构，烧穿 61.40亿 Token，K 线上一根大红烛拔地而起，子图的代码变更则是一根大绿柱一砸到底。
-
-![设计参考截图](assets/reference.png)
-
-## 快速开始
-
-```bash
-npm install        # 依赖安装
-npm run dev        # 开发服务器（默认 http://localhost:5173）
-npm run build      # 类型检查 + 生产构建（dist/）
-npm run preview    # 预览生产构建
-npm test           # 单元测试（node:test，先经 tsc 编译）
-npm run typecheck  # 仅类型检查
+```text
+AI 研究 -> 风控预览 -> 锁定君弘订单草稿 -> 本人在君弘官方客户端核对并确认 -> 成交回填
 ```
 
-要求 Node ≥ 20.19（开发环境实测 Node 24）。
+工作台不模拟点击君弘、不逆向登录、不读取或保存交易密码。普通君弘账户不能因为填写了资金账号就变成 API 账户；未获得券商正式接口权限前，自动下单始终锁定。
 
-## 界面结构（对照设计稿 `designs/dsh-terminal/DSH Terminal.html`）
+## 当前能力
 
-| 区域 | 组件 | 说明 |
+| 能力 | 状态 | 说明 |
 | --- | --- | --- |
-| 顶部红色标题栏 | `TopBar` | 指数条（总代码量 / 活跃会话 / Token 消耗）+ 搜索框（工作区/代码检索并跳转） |
-| 左栏 | `Rail` | deepseek 字标 + HARNESS PRO 徽章；导航仅保留 **对话（主界面）/ 技能 / 插件 / 设置** 四个 DSH 入口（后三个为插件注入后的集成点）；**关注项目**列表 = 各工作区，显示 Token 消耗量与涨跌幅，点击切换 |
-| 中栏上 | `ChatPanel` | 对话 / Trajectory / 检查点 三个页签；ASCII 欢迎横幅、agent 轨迹（Think/Read/Bash/Skill/Edit，可展开详情）、消息气泡、仓库/分支 chip、消息输入框（模型切换、权限模式） |
-| 中栏下 | `KLineChart` | Canvas 自绘 K 线：分时 / 5日 / 日K / 周K / 月K；**主图 = Token 消耗量**（MA5/10/20），子图 = 代码变更量（红=增行，绿=删行，GitHub 风格，VOL(5,10)）；十字光标 + OHLC 信息条；重构日大红烛呼吸光晕 + 子图绿柱「一砸到底」标注；**高度可拖动调节**（聊天区与图表之间的分隔条，双击复位，位置本地记忆） |
-| 右栏 | `QuotePanel` | 行情详情（今日 Token 消耗 / 环比、最高/今开/最低/昨收、提交量、代码量、变更率、上下文 TTM、总Token、会话数）；三个页签：**最近变更**（最近几次代码修改，红增绿删，GitHub 风格）/ **git tree**（最近提交文件树）/ **token流向**（最近几次 Token 被哪些项目消耗）；**分时成交 = 最近几分钟的每分钟 Token 消耗**（滚动刷新） |
-| 底部状态栏 | `StatusBar` | DSH指数（今日 Token 消耗）/ 会话 / 插件三大指数实时跳动、时钟、连接状态 |
+| 沪深北行情与日 K | 可用 | 腾讯公开行情，仅作参考，委托前以券商报价为准 |
+| 自定义证券 | 可用 | 输入任意沪深北 6 位代码，可选 `.SH`、`.SZ`、`.BJ` |
+| 本地模拟盘 | 可用 | 初始资金 1 万元，含持仓、T+1、费用估算和订单记录 |
+| DeepSeek 分析 | 待用户配置 Key | Key 由 Windows DPAPI 加密，不写入源码或浏览器存储 |
+| DeepSeek Harness | 已集成 | 独立工作区默认运行在 `127.0.0.1:3080` |
+| 国泰海通君弘人工实盘 | 可用 | 生成草稿后，由本人在君弘 APP 或富易桌面端确认 |
+| 国泰海通 STS / 官方 API | 默认锁定 | 需先完成程序化交易报告、券商授权和官方桥接 |
+| 同花顺 SuperMind | 连接器已预留 | 需购买实盘能力、确认券商支持并取得官方权限 |
 
-全部数据为**客户端实时模拟**（确定性种子 + 心跳引擎）：每分钟 Token 消耗每 ~12s 新增一笔、最近变更偶发新提交、token 流向抖动、指数随机游走、时钟走秒。
+## 安全边界
 
-## 代码结构
+- 服务默认只监听 `127.0.0.1`，拒绝外部主机和不可信网页发起写操作。
+- 默认单笔上限 `1000` 元、单日累计上限 `3000` 元。
+- 限价偏离公开参考价超过 `5%` 时阻断，超过 `3%` 时警告。
+- 股票按 `0.01` 元价格档位、ETF/基金按 `0.001` 元档位校验。
+- 买入按 100 股/份整数手校验；卖出会在模拟盘检查可卖数量和 T+1。
+- 订单预览 5 分钟失效；提交时重新拉取行情并再次执行风控。
+- 人工实盘无法读取真实余额、持仓和佣金时只显示“需在君弘复核”，不会伪造通过结果。
+- 演示行情不会用于实盘价格偏离校验；接口实盘在没有真实参考价时直接阻断。
+- 指数、可转债和无法可靠识别的代码只允许观察，订单入口仅面向已识别的 A 股与场内基金。
+- 接口实盘同时受 `LIVE_TRADING_ENABLED` 和官方桥接凭据控制，缺一不可。
 
+## Windows 部署
+
+要求 Node.js `>= 20.19`。在 PowerShell 中执行：
+
+```powershell
+Set-Location E:\stokc
+Copy-Item .env.example .env.local
+npm ci
+npm run verify
+npm start
 ```
-client-plugin/                 # DSH 客户端插件 @deepseek-ai/dsh-client-tonghuashun
-  src/                         # 终端 UI 本体（App / components / lib / data / bridge / styles）
-  src/index.ts                 # node half（空 apply）
-  src/client/                  # 浏览器半：样式注入 + 'root' 槽注册（TerminalRoot）
-  scripts/gen-styles.mjs       # 构建期样式烘焙（global.css → styles.generated.ts）
-  scripts/smoke-bundle.mjs     # bundle 装载 + SSR 冒烟
-  deploy/web-terminal.patch.yml  # 禁用默认 web UI 行的 profile overlay
-  tsdown.config.ts             # 复刻 monorepo clientBundle 产物约定（闭包工厂 + 平台外部化）
-src/main.tsx                   # 独立开发外壳入口（Vite，引用 client-plugin 的 UI 源码）
-styles 见 client-plugin/src/styles/global.css（主题，CSS 变量，红涨绿跌）
-plugin/                        # 数据插件 dsh-tonghuashun-meter（bundle，详见 plugin/README.md）
-  src/  fold / aggregate / store / index（cordis 入口）
-  scripts/smoke-real-session.mjs   # 真实会话日志冒烟（解码 session.jsonl.zstd）
-tests/                         # node:test 单元测试（数据层）
+
+生产工作台地址：
+
+```text
+http://127.0.0.1:4174
 ```
 
-数据层说明：`client-plugin/src/lib/`（rand / format / market / useMarketEngine）、
-`client-plugin/src/data/trajectory.ts`、`client-plugin/src/bridge/`（DSH 数据接入契约 + 插件快照契约，
-详见 `client-plugin/src/bridge/README.md`）。
+另开一个 PowerShell 窗口启动 DeepSeek Harness：
 
-## 行情隐喻映射
+```powershell
+Set-Location E:\stokc
+npm run harness
+```
 
-| 股票概念 | DSH 概念 |
+Harness 地址：
+
+```text
+http://127.0.0.1:3080
+```
+
+`npm start` 和 `npm run harness` 都会读取仓库根目录的 `.env.local`。操作系统中已经存在的环境变量优先，不会被文件覆盖。
+
+## DeepSeek 配置
+
+1. 打开工作台右上角“设置”。
+2. 输入本人从 DeepSeek 官方平台取得的 API Key。
+3. 保存后，Key 只写入 `.data/deepseek-key.dpapi`，并由当前 Windows 用户的 DPAPI 保护。若 Key 来自环境变量，设置页会保持只读。
+4. 重启 Harness 后，启动脚本会把 Key 注入 Harness 子进程。
+
+不要把 Key 写入 README、截图、Git 提交或聊天内容。复制 DPAPI 文件到另一台电脑或另一个 Windows 用户下通常无法解密，这是预期行为。
+
+## 君弘实盘流程
+
+建议先在模拟盘完整走通一笔，再进行首笔小额实盘：
+
+1. 在自选列表输入证券代码，确认名称、交易所和价格档位。
+2. 查看 K 线和风险标签；需要时用 DeepSeek 生成“支持理由、反对理由、失效条件和待核实事项”。
+3. 在“模拟账户”完成至少一笔同方向、同数量级的订单。
+4. 将交易通道切换到“国泰海通君弘”。
+5. 输入限价和数量，生成订单预览，逐条查看通过、警告和阻断项。
+6. 按界面要求输入一次性确认文本并锁定草稿。此时订单尚未发送给券商。
+7. 点击“打开君弘”。已安装富易时工作台会启动客户端；未安装时会打开官方下载页。也可以直接使用手机君弘 APP。
+8. 在君弘内重新核对证券代码、买卖方向、限价、数量、可用资金或可卖数量，再由本人点击最终确认。
+9. 全部成交、部分成交、撤单或被拒后，在“实盘订单审计”中回填状态、成交价、成交数量和合同号。
+
+A 股买入通常以 100 股为一手。默认单笔 1000 元保护线意味着高于 10 元的股票可能连一手都无法提交，这是有意的保护；不要为了绕过限制随意调高额度。实际佣金、最低佣金和规费以本人账户交割单为准。
+
+## 富易官方客户端
+
+只从[国泰海通富易官方下载页](https://fy.gtht.com/fuyi-download/)获取客户端。本次部署于 2026-08-18 从官网接口核验到：
+
+| 项目 | 官网值 |
 | --- | --- |
-| 股价 / 指数 | Token 消耗量（日 K 收盘 = 当日总消耗） |
-| 涨跌幅 | Token 消耗环比（红=增，绿=减） |
-| 成交量 VOL（子图） | 代码变更量（行，红=增行，绿=删行，GitHub 风格） |
-| 分时成交 | 每分钟 Token 消耗 |
-| 五档 → 最近变更 | 最近几次代码修改（+行红 / -行绿） |
-| 资金流向 → token流向 | 最近几次 Token 被哪些项目消耗 |
-| 提交明细 → git tree | 最近一次提交的文件树 |
-| 大红烛 + 绿柱一砸到底 | 删 10,000 行的大重构：Token 烧穿 + 代码量砸底（DSH001） |
+| Windows 版本 | `V4.29.6.0804` |
+| 文件名 | `setup_fy_super_20260805.exe` |
+| 文件大小 | `348,994,056` 字节 |
+| 官网 MD5 | `d9f81b52ced2038cb045577331deb56f` |
+| CDN 最后修改时间 | `2026-08-05 11:19:18 GMT` |
 
-## 与 DSH 的集成路径（插件注入）
+官网版本会更新，安装时应以下载页当日公布的版本和 MD5 为准，并在 Windows 文件属性中确认数字签名有效。工作台会从环境变量、常见安装目录和 Windows 卸载注册表中查找富易；若自动检测失败，在 `.env.local` 中填写：
 
-1. **独立运行**：当前模式，行情与轨迹全部本地模拟，右下角有 `demo · mock market` 徽标。
-2. **数据插件**：`plugin/` 是 bundle 形态的 **dsh-tonghuashun-meter**——`pnpm dsh plugin --profile web add` 挂载后
-   （20260812 快照起官方加载方式是 dsh 仓库根目录源码启动 `pnpm dsh`），
-   实时收集/记录每个会话的 Token 消耗与工具调用（`$DSH_HOME/tonghuashun/usage.jsonl` + `days.json`），
-   并在 web 组合暴露 `GET /tonghuashun/snapshot`；前端 `client-plugin/src/bridge/snapshot.ts` 已含契约与 fetch 探针。
-3. **终端界面插件**：`client-plugin/` 是 **@deepseek-ai/dsh-client-tonghuashun**（bundle + `dsh.client`），
-   浏览器半注册 'root' 槽替换默认界面；安装 = `pnpm dsh plugin --profile web add "<repo>/client-plugin"`
-   + 叠加 `deploy/web-terminal.patch.yml` 禁用默认 web UI 行（'root' 是 single 槽，先到先得）。
-   轨迹流 / 快照→UI 映射 / 左栏三个 DSH 入口的接入点已预留（TODO 见 `client-plugin/src/bridge/README.md`）。
-4. **组件复用**：DSH SDK 中可替换的现成组件（`ui-conversation` / `ui-trajectory` / `ui-primitives` 的 `TerminalBlock`、`CodeBlock`、`BrandWordmark` 等）见 bridge README；左栏「技能 / 插件 / 设置」三个入口将打开对应 DSH 窗口。
+```dotenv
+GTJA_CLIENT_PATH=C:\Path\To\OfficialClient.exe
+```
 
-## 开发注意事项
+富易桌面端不是生成草稿的前置条件：只安装了手机君弘 APP 时，仍可在工作台锁定草稿，再到手机端手工录入和确认。
 
-- `.npmrc` 设置了 `ignore-scripts=true`：本仓库最初在受限沙箱内开发，包 postinstall 脚本（如 esbuild 校验）无法 spawn 子进程，但 esbuild 平台二进制以 optionalDependencies 安装，构建不受影响。在普通开发机上可删除该设置后重新安装。
-- 测试脚本使用 `node --test --experimental-test-isolation=none`：test runner 按文件 spawn 子进程在沙箱内被禁，改为进程内运行。
-- 测试管线为「tsc 编译到 `.test-dist/`（CommonJS）→ node:test」，不依赖 vitest/esbuild 转译；如需 vitest 工作流，安装 vitest 后即可用同批测试文件。
+## STS / 官方 API 边界
+
+国泰海通[开放金融云](https://open.gtja.com/)公开介绍了智能交易服务，但没有把普通君弘账号登录信息当作通用交易 API 凭据。需要通过客户经理或客服 `95521` 确认以下事项：
+
+1. 本人账户是否允许程序化交易，以及适用的投资者条件。
+2. 是否需要先在专业化交易服务平台完成程序化交易报告。
+3. 可用产品究竟是 STS、算法交易终端还是正式 API/SDK。
+4. 券商提供的测试环境、接口文档、证书、IP 白名单和风控要求。
+5. 软件名称、版本、最高申报速率和单日最高申报笔数应如何报告。
+
+官方程序化交易咨询入口还包括[国泰海通程序化交易报告白皮书](https://vintex.gtja.com/guidebook/)；开放金融云公开的智能交易咨询邮箱为 `fuyitest@gtht.com`。
+
+监管层面，[证监会《证券市场程序化交易管理规定（试行）》](https://www.csrc.gov.cn/csrc/c100028/c7480577/content.shtml)要求程序化交易“先报告、后交易”；[上交所实施细则](https://www.sse.com.cn/lawandrules/sselawsrules2025/trade/universal/c/c_20250612_10781696.shtml)自 2025-07-07 起施行，并把个人投资者纳入程序化交易投资者范围。因此，取得接口技术资料不等于已经可以直接实盘。
+
+券商正式批准并提供本地桥接服务后，才配置：
+
+```dotenv
+GTJA_API_BRIDGE_URL=http://127.0.0.1:9001
+GTJA_API_BRIDGE_TOKEN=replace-with-local-bridge-token
+LIVE_TRADING_ENABLED=true
+```
+
+桥接必须是依据券商正式文档实现的本地服务。不要把网页接口、客户端私有协议、自动点击或交易密码包装成“API”。
+
+## 同花顺 SuperMind
+
+工作台保留了 SuperMind 连接器合同，但当前不会假装已经连通。同花顺[官方研究环境/实盘文档](https://quant.10jqka.com.cn/view/help/14)明确说明实盘依赖客户端、已登录资金账号和 `TradeAPI`；真实资金能力、支持券商和费用需要向 SuperMind 官方确认。
+
+获批并完成官方桥接后使用：
+
+```dotenv
+SUPERMIND_BRIDGE_URL=http://127.0.0.1:9002
+SUPERMIND_BRIDGE_TOKEN=replace-with-local-bridge-token
+LIVE_TRADING_ENABLED=true
+```
+
+每个券商适配器都必须独立处理认证、查询、下单、撤单、成交回报、幂等和审计，不能把某个平台的私有接口假定为通用协议。
+
+## 配置项
+
+| 变量 | 默认值 | 用途 |
+| --- | --- | --- |
+| `WORKBENCH_HOST` | `127.0.0.1` | 工作台监听地址，建议不要改成公网地址 |
+| `WORKBENCH_PORT` | `4174` | 生产工作台端口 |
+| `WORKBENCH_DATA_DIR` | `.data` | 本地账户、审计和 DPAPI 文件目录 |
+| `MAX_ORDER_VALUE` | `1000` | 单笔委托金额上限，人民币元 |
+| `MAX_DAILY_VALUE` | `3000` | 当日累计委托金额上限，人民币元 |
+| `MARKET_DATA_PROVIDER` | `tencent` | 设为 `demo` 时只使用演示行情 |
+| `DEEPSEEK_MODEL` | `deepseek-chat` | DeepSeek 分析模型 |
+| `GTJA_CLIENT_PATH` | 自动检测 | 富易主程序路径 |
+| `LIVE_TRADING_ENABLED` | `false` | 官方接口实盘总开关 |
+
+## 数据与审计
+
+```text
+.data/paper-account.json     模拟账户、持仓和订单
+.data/manual-orders.json    君弘人工实盘草稿及回填状态
+.data/audit.jsonl           预览、AI 分析和实盘动作审计
+.data/deepseek-key.dpapi    Windows DPAPI 加密后的 DeepSeek Key
+.dsh/                       DeepSeek Harness 本地工作区数据
+```
+
+这些目录已被 Git 忽略。备份前应确认文件中是否含账户相关数据；不要把它们推送到远程仓库。
+
+## 开发与验证
+
+```powershell
+npm run dev        # 前端 4173 + API 4174
+npm run typecheck  # TypeScript 检查
+npm test           # 风控、行情、模拟盘、人工订单、连接器和 API 测试
+npm run build      # 生成 dist
+npm run verify     # typecheck + test + build
+```
+
+生产模式由 `server/index.mjs` 同时提供静态前端和本地 API。主要模块：
+
+```text
+src/                              React 工作台
+server/core/market.mjs            行情与证券代码归一化
+server/core/risk.mjs              订单风控、费用估算和预览
+server/core/paper-broker.mjs      本地模拟券商
+server/core/manual-orders.mjs     君弘草稿、回填和审计
+server/core/connectors.mjs        君弘、STS 与 SuperMind 连接器
+server/core/secrets.mjs           Windows DPAPI 密钥存储
+scripts/harness.mjs               DeepSeek Harness 启动与 Key 注入
+```
+
+```mermaid
+flowchart LR
+  M[公开行情] --> W[AI 辅助工作台]
+  D[DeepSeek] --> W
+  W --> R[订单预览与二次风控]
+  R --> P[本地模拟盘]
+  R --> J[君弘人工实盘草稿]
+  J --> C[本人在官方客户端确认]
+  R -. 获批后才启用 .-> A[官方 API 桥接]
+```
+
+## 已知限制
+
+- 公开行情可能延迟、缺失或与券商盘口不同，不能用于无人值守下单。
+- AI 默认没有实时公告和新闻全文，分析结果必须回到交易所公告和券商页面核实。
+- 人工实盘模式不读取真实资金和持仓，因此买入余额、卖出可用数量、T+1 和真实佣金必须在君弘再次检查。
+- 当前没有国泰海通正式 API 权限和桥接凭据，因此接口实盘保持锁定。
+- 当前没有 SuperMind 实盘许可和受支持资金账号，因此只保留扩展接口，不提供虚假“已连接”状态。

@@ -2,24 +2,30 @@
   "name": "tonghuashun-harness",
   "private": true,
   "version": "0.1.0",
-  "description": "同花顺风格股票终端 + AI Agent 工作区融合的 DeepSeek Harness (DSH) 终端式前端",
+  "description": "面向 A 股新手的本地 AI 辅助交易工作台，优先支持国泰海通君弘人工确认实盘",
   "type": "module",
   "engines": {
     "node": ">=20.19.0"
   },
   "scripts": {
-    "dev": "vite",
+    "dev": "node scripts/dev.mjs",
+    "dev:web": "vite",
+    "server": "node server/index.mjs",
+    "start": "node server/index.mjs",
+    "harness": "node scripts/harness.mjs",
     "build": "tsc -p tsconfig.json && vite build",
     "preview": "vite preview",
     "typecheck": "tsc -p tsconfig.json",
-    "test": "tsc -p tsconfig.test.json && node --test --experimental-test-isolation=none \".test-dist/tests/*.test.js\"",
-    "test:watch": "tsc -p tsconfig.test.json --watch"
+    "test": "node --test tests/risk.test.mjs tests/market-core.test.mjs tests/paper-broker.test.mjs tests/manual-orders.test.mjs tests/connectors.test.mjs tests/secrets.test.mjs tests/api.test.mjs",
+    "verify": "npm run typecheck && npm test && npm run build"
   },
   "dependencies": {
+    "lucide-react": "^0.468.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },
   "devDependencies": {
+    "@deepseek-ai/dsh": "^0.1.0-rc.7",
     "@types/node": "^22.10.2",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",

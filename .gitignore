@@ -5,3 +5,11 @@ dist/
 !.test-dist/package.json
 .DS_Store
 *.log
+.data/
+.dsh/
+.env.local
+playwright-report/
+test-results/
+output/playwright/
+output/installers/
+.playwright-cli/

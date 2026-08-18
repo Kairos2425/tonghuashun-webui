@@ -4,12 +4,17 @@ import react from '@vitejs/plugin-react'
 export default defineConfig({
   plugins: [react()],
   server: {
-    port: 5173,
-    strictPort: false,
-    // 独立开发外壳从 client-plugin/src 引入 UI 源码
-    fs: {
-      allow: ['..'],
+    host: '127.0.0.1',
+    port: 4173,
+    strictPort: true,
+    proxy: {
+      '/api': 'http://127.0.0.1:4174',
     },
+  },
+  preview: {
+    host: '127.0.0.1',
+    port: 4175,
+    strictPort: true,
   },
   build: {
     target: 'es2022',
