@@ -140,8 +140,14 @@ export async function getCandles(symbol, limit = 80) {
   const cacheKey = `${symbol}:${limit}`
   const cached = candleCache.get(cacheKey)
   if (cached && cached.expiresAt > Date.now()) return cached.data
+  if ((process.env.MARKET_DATA_PROVIDER ?? 'tencent') === 'demo') {
+    if (!isBuiltIn) throw withStatus(`演示模式不为 ${definition.symbol} 生成虚假 K 线`, 503)
+    const result = { symbol, source: '本地演示行情', adjusted: '演示', fetchedAt: new Date().toISOString(), warning: '演示数据', candles: generateFallbackCandles(symbol, limit) }
+    candleCache.set(cacheKey, { data: result, expiresAt: Date.now() + 60_000 })
+    return result
+  }
   try {
-    const response = await fetch(`https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param=${definition.providerCode},day,,,${Math.min(240, Math.max(20, limit))},qfq`, {
+    const response = await fetch(`https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param=${definition.providerCode},day,,,${Math.min(520, Math.max(20, limit))},qfq`, {
       headers: { Referer: 'https://gu.qq.com/', 'User-Agent': 'Mozilla/5.0 StockWorkbench/1.0' },
       signal: AbortSignal.timeout(5_000),
     })

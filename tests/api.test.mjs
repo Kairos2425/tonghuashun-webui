@@ -180,3 +180,43 @@ test('今日君弘账户镜像参与人工实盘的余额与持仓阻断', async
   assert.equal(sellPreview.preview.ok, false)
   assert.equal(sellPreview.preview.checks.some((check) => check.code === 'position' && check.level === 'block'), true)
 })
+
+test('量化自动执行默认关闭、实盘硬锁定且拒绝演示数据回测', async (t) => {
+  const { baseUrl } = await startServer(t)
+  const initial = await fetch(`${baseUrl}/api/quant/automation`).then((response) => response.json())
+  assert.equal(initial.automation.enabled, false)
+  assert.equal(initial.automation.mode, 'paper')
+  assert.equal(initial.liveAutomationLocked, true)
+
+  const liveAttempt = await fetch(`${baseUrl}/api/quant/automation`, {
+    method: 'PUT',
+    headers: mutationHeaders(),
+    body: JSON.stringify({ enabled: true, mode: 'live', symbol: '510300.SH' }),
+  })
+  assert.equal(liveAttempt.status, 423)
+
+  const configured = await fetch(`${baseUrl}/api/quant/automation`, {
+    method: 'PUT',
+    headers: mutationHeaders(),
+    body: JSON.stringify({ enabled: true, mode: 'paper', symbol: '510300.SH', buyThreshold: 0.58, sellThreshold: 0.42, maxOrderValue: 800 }),
+  })
+  assert.equal(configured.status, 200)
+  assert.equal((await configured.json()).automation.enabled, true)
+
+  const evaluation = await fetch(`${baseUrl}/api/quant/automation/run`, {
+    method: 'POST',
+    headers: mutationHeaders(),
+  }).then((response) => response.json())
+  assert.match(evaluation.evaluation.status, /preview|blocked/)
+  assert.match(evaluation.evaluation.reason, /执行窗口|公开.*行情不可用/)
+
+  const backtest = await fetch(`${baseUrl}/api/quant/backtest`, {
+    method: 'POST',
+    headers: mutationHeaders(),
+    body: JSON.stringify({ symbol: '510300.SH' }),
+  })
+  assert.equal(backtest.status, 503)
+
+  const portfolio = await fetch(`${baseUrl}/api/portfolio`).then((response) => response.json())
+  assert.equal(portfolio.portfolio.orders.length, 0)
+})

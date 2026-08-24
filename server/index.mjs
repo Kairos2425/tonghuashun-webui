@@ -7,10 +7,12 @@ import { PaperBroker } from './core/paper-broker.mjs'
 import { ManualOrderStore } from './core/manual-orders.mjs'
 import { LiveAccountStore } from './core/live-account.mjs'
 import { SecretStore } from './core/secrets.mjs'
-import { createOrderPreview, DEFAULT_RISK_CONFIG, validateOrder } from './core/risk.mjs'
+import { createOrderPreview, DEFAULT_RISK_CONFIG, estimateFees, validateOrder } from './core/risk.mjs'
 import { analyzeWithDeepSeek } from './core/deepseek.mjs'
 import { connectorStatuses, launchGtjaClient, submitOfficialOrder } from './core/connectors.mjs'
 import { loadLocalEnv } from './core/env.mjs'
+import { analyzeRelativeValue, runMlBacktest } from './core/quant-research.mjs'
+import { StrategyAutomationStore } from './core/strategy-automation.mjs'
 
 const serverDir = fileURLToPath(new URL('.', import.meta.url))
 const rootDir = resolve(serverDir, '..')
@@ -29,8 +31,10 @@ const riskConfig = {
 const paperBroker = new PaperBroker(join(dataDir, 'paper-account.json'))
 const manualOrders = new ManualOrderStore(join(dataDir, 'manual-orders.json'), join(dataDir, 'audit.jsonl'))
 const liveAccount = new LiveAccountStore(join(dataDir, 'live-account.dpapi'))
+const strategyAutomation = new StrategyAutomationStore(join(dataDir, 'strategy-automation.json'))
 const secrets = new SecretStore(join(dataDir, 'deepseek-key.dpapi'))
 const previews = new Map()
+let automationRunPromise = null
 
 const mimeTypes = {
   '.html': 'text/html; charset=utf-8',
@@ -63,6 +67,12 @@ server.listen(port, host, () => {
   console.log(`[workbench] http://${host}:${port}`)
   console.log(`[workbench] 实盘 API: ${liveEnabled ? '已启用' : '已锁定'} · 单笔上限 ¥${riskConfig.maxOrderValue}`)
 })
+
+const automationTimer = setInterval(() => {
+  void runStrategyAutomation().catch((error) => console.error(`[quant] 自动评估失败：${error?.message || error}`))
+}, 60_000)
+automationTimer.unref()
+setTimeout(() => void runStrategyAutomation().catch(() => {}), 5_000).unref()
 
 async function handleApi(request, response, url) {
   if (!['GET', 'HEAD'].includes(request.method || 'GET')) enforceMutationRequest(request)
@@ -230,6 +240,62 @@ async function handleApi(request, response, url) {
     const analysis = await analyzeWithDeepSeek({ key: await secrets.get(), question: body.question, instrument, quote, position, model: body.model })
     await manualOrders.audit('ai_analysis_created', { symbol, questionLength: String(body.question ?? '').length, model: analysis.model, usage: analysis.usage })
     return sendJson(response, 200, { ok: true, analysis })
+  }
+
+  if (request.method === 'POST' && url.pathname === '/api/quant/backtest') {
+    const body = await readJsonBody(request)
+    const symbol = normalizeSymbol(body.symbol)
+    const instrument = getInstrument(symbol)
+    if (!symbol || !instrument?.tradable) throw withStatus('量化研究仅支持已识别的 A 股或场内基金', 400)
+    const candleResult = await getCandles(symbol, 500)
+    if (candleResult.source !== '腾讯公开行情') throw withStatus('公开历史行情不可用，拒绝使用演示数据生成量化结论', 503)
+    const result = runMlBacktest(candleResult.candles, { ...body, quantityRule: instrument.quantityRule })
+    await manualOrders.audit('quant_backtest_created', {
+      symbol,
+      model: result.model.id,
+      outOfSampleSamples: result.model.outOfSampleSamples,
+      completedTrades: result.metrics.completedTrades,
+    })
+    return sendJson(response, 200, { ok: true, symbol, source: candleResult.source, fetchedAt: candleResult.fetchedAt, result })
+  }
+
+  if (request.method === 'GET' && url.pathname === '/api/quant/relative-value') {
+    const left = normalizeSymbol(url.searchParams.get('left'))
+    const right = normalizeSymbol(url.searchParams.get('right'))
+    if (!left || !right || left === right) throw withStatus('请输入两个不同的证券代码', 400)
+    const pairInstruments = [getInstrument(left), getInstrument(right)]
+    if (pairInstruments.some((item) => !item?.tradable || !String(item.kind).includes('ETF'))) throw withStatus('相对价值监控第一阶段仅支持两个场内 ETF', 400)
+    const [leftCandles, rightCandles] = await Promise.all([getCandles(left, 500), getCandles(right, 500)])
+    if ([leftCandles, rightCandles].some((item) => item.source !== '腾讯公开行情')) throw withStatus('公开历史行情不可用，拒绝使用演示数据计算价差', 503)
+    return sendJson(response, 200, {
+      ok: true,
+      left,
+      right,
+      source: '腾讯公开行情',
+      result: analyzeRelativeValue(leftCandles.candles, rightCandles.candles, {
+        window: url.searchParams.get('window'),
+        threshold: url.searchParams.get('threshold'),
+      }),
+    })
+  }
+
+  if (request.method === 'GET' && url.pathname === '/api/quant/automation') {
+    return sendJson(response, 200, { ok: true, automation: await strategyAutomation.get(), liveAutomationLocked: true })
+  }
+
+  if (request.method === 'PUT' && url.pathname === '/api/quant/automation') {
+    const automation = await strategyAutomation.update(await readJsonBody(request))
+    await manualOrders.audit('quant_automation_updated', {
+      enabled: automation.enabled,
+      mode: automation.mode,
+      symbol: automation.symbol,
+      strategyId: automation.strategyId,
+    })
+    return sendJson(response, 200, { ok: true, automation, liveAutomationLocked: true })
+  }
+
+  if (request.method === 'POST' && url.pathname === '/api/quant/automation/run') {
+    return sendJson(response, 200, { ok: true, evaluation: await runStrategyAutomation({ force: true }) })
   }
 
   throw withStatus('API 路径不存在', 404)
@@ -401,4 +467,157 @@ function withStatus(message, statusCode) {
   const error = new Error(message)
   error.statusCode = statusCode
   return error
+}
+
+async function runStrategyAutomation({ force = false } = {}) {
+  if (automationRunPromise) return automationRunPromise
+  automationRunPromise = runStrategyAutomationUnlocked({ force }).finally(() => { automationRunPromise = null })
+  return automationRunPromise
+}
+
+async function runStrategyAutomationUnlocked({ force }) {
+  const config = await strategyAutomation.get()
+  if (!config.enabled) return { status: 'disabled', message: '模拟盘自动执行未启用' }
+  if (config.mode !== 'paper') throw withStatus('实盘自动执行保持锁定', 423)
+  const window = paperExecutionWindow()
+  if (!window.open && !force) return { status: 'sleeping', message: window.message, executionWindow: window.label }
+  if (!force && config.lastEvaluation?.at) {
+    const elapsed = Date.now() - new Date(config.lastEvaluation.at).getTime()
+    if (Number.isFinite(elapsed) && elapsed < config.evaluationIntervalMinutes * 60_000) {
+      return { status: 'waiting', message: '尚未到下一次评估时间', nextInMs: config.evaluationIntervalMinutes * 60_000 - elapsed }
+    }
+  }
+
+  const instrument = getInstrument(config.symbol)
+  const candleResult = await getCandles(config.symbol, 500)
+  if (candleResult.source !== '腾讯公开行情') {
+    const evaluation = { status: 'blocked', signalDate: null, signal: 'HOLD', reason: '公开历史行情不可用' }
+    await strategyAutomation.record(evaluation)
+    return evaluation
+  }
+  const research = runMlBacktest(candleResult.candles, {
+    buyThreshold: config.buyThreshold,
+    sellThreshold: config.sellThreshold,
+    maxOrderValue: Math.min(config.maxOrderValue, riskConfig.maxOrderValue),
+    quantityRule: instrument.quantityRule,
+  })
+  if (config.lastProcessedSignalDate === research.current.date) {
+    return { status: 'already_evaluated', message: '该信号日期已经处理，不重复下单', ...config.lastEvaluation }
+  }
+  if (!window.open) {
+    return {
+      status: 'preview',
+      signalDate: research.current.date,
+      signal: research.current.signal,
+      probability: research.current.probability,
+      action: 'WINDOW_CLOSED',
+      reason: window.message,
+      executionWindow: window.label,
+    }
+  }
+
+  const market = await getMarketSnapshot({ force: true })
+  if (market.sourceKind !== 'public_reference') {
+    const evaluation = { status: 'blocked', signalDate: research.current.date, signal: research.current.signal, probability: research.current.probability, reason: '实时公开行情不可用' }
+    await strategyAutomation.record(evaluation)
+    return evaluation
+  }
+  const quote = market.quotes.find((item) => item.symbol === config.symbol) ?? await getSecurityQuote(config.symbol, { force: true, allowDemo: false })
+  if (tradingDate(quote.quoteTime) !== tradingDate()) {
+    const evaluation = { status: 'blocked', signalDate: research.current.date, signal: research.current.signal, probability: research.current.probability, action: 'BLOCKED', reason: '实时行情日期不是今日，可能为休市日或行情停更' }
+    await strategyAutomation.record(evaluation)
+    return evaluation
+  }
+  const portfolio = await paperBroker.portfolio(market.quotes)
+  const position = portfolio.positions.find((item) => item.symbol === config.symbol)
+  let action = 'NONE'
+  let reason = research.current.explanation
+  let order = null
+
+  if (research.current.signal === 'BUY' && !position) {
+    const budget = Math.min(config.maxOrderValue, riskConfig.maxOrderValue, portfolio.cash)
+    const quantity = automationBuyQuantity(budget, quote.price, instrument.quantityRule)
+    if (quantity > 0) {
+      const candidate = { symbol: config.symbol, name: quote.name, side: 'BUY', price: roundToTick(quote.price, instrument.priceTick), quantity, mode: 'paper', broker: 'paper' }
+      const validation = validateOrder(candidate, await buildRiskContext(candidate, market, { canSubmit: true }), riskConfig)
+      if (validation.ok) {
+        order = await paperBroker.execute(validation.order)
+        action = 'BUY_EXECUTED'
+      } else {
+        action = 'BLOCKED'
+        reason = validation.checks.find((item) => item.level === 'block')?.message || '模拟盘风控未通过'
+      }
+    } else {
+      action = 'BLOCKED'
+      reason = '单笔上限与可用资金不足以满足最低申报数量'
+    }
+  } else if (research.current.signal === 'SELL' && position) {
+    if (position.availableQuantity > 0) {
+      const candidate = { symbol: config.symbol, name: quote.name, side: 'SELL', price: roundToTick(quote.price, instrument.priceTick), quantity: position.availableQuantity, mode: 'paper', broker: 'paper' }
+      const validation = validateOrder(candidate, await buildRiskContext(candidate, market, { canSubmit: true }), riskConfig)
+      if (validation.ok) {
+        order = await paperBroker.execute(validation.order)
+        action = 'SELL_EXECUTED'
+      } else {
+        action = 'BLOCKED'
+        reason = validation.checks.find((item) => item.level === 'block')?.message || '模拟盘风控未通过'
+      }
+    } else {
+      action = 'WAIT_T1'
+      reason = '持仓当日不可卖，等待 T+1'
+    }
+  } else if (research.current.signal === 'BUY' && position) {
+    action = 'HOLD_POSITION'
+    reason = '已有该 ETF 持仓，不重复加仓'
+  } else if (research.current.signal === 'SELL' && !position) {
+    action = 'NO_POSITION'
+    reason = '当前没有该 ETF 持仓，无需卖出'
+  }
+
+  const evaluation = {
+    status: 'evaluated',
+    signalDate: research.current.date,
+    signal: research.current.signal,
+    probability: research.current.probability,
+    action,
+    reason,
+    orderId: order?.id ?? null,
+  }
+  await strategyAutomation.record(evaluation, { processed: true })
+  await manualOrders.audit('quant_paper_automation_evaluated', evaluation)
+  return evaluation
+}
+
+function automationBuyQuantity(budget, price, rule = {}) {
+  const minimum = Math.max(1, Number(rule.buyMin) || 100)
+  const step = Math.max(1, Number(rule.buyStep) || 100)
+  const maximum = Math.floor((budget - estimateFees({ side: 'BUY', price, quantity: minimum }).total) / price)
+  if (maximum < minimum) return 0
+  return minimum + Math.floor((maximum - minimum) / step) * step
+}
+
+function roundToTick(value, tick = 0.01) {
+  const units = Math.round(value / tick)
+  const digits = tick < 0.01 ? 3 : 2
+  return Number((units * tick).toFixed(digits))
+}
+
+function paperExecutionWindow(now = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Shanghai',
+    weekday: 'short',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(now)
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]))
+  const weekday = values.weekday
+  const minutes = Number(values.hour) * 60 + Number(values.minute)
+  const weekdayOpen = !['Sat', 'Sun'].includes(weekday)
+  const open = weekdayOpen && minutes >= 9 * 60 + 35 && minutes <= 9 * 60 + 50
+  return {
+    open,
+    label: '交易日 09:35–09:50（北京时间）',
+    message: weekdayOpen ? '当前不在模拟盘自动执行窗口，仅返回信号预览' : '周末不执行策略，仅返回信号预览',
+  }
 }

@@ -1,4 +1,4 @@
-export type Section = 'dashboard' | 'research' | 'trade' | 'account' | 'connections'
+export type Section = 'dashboard' | 'research' | 'quant' | 'trade' | 'account' | 'connections'
 export type Side = 'BUY' | 'SELL'
 
 export interface QuantityRule {
@@ -213,4 +213,95 @@ export interface AiAnalysis {
   generatedAt: string
   usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } | null
   result: AiResult
+}
+
+export type QuantSignal = 'BUY' | 'SELL' | 'HOLD'
+
+export interface QuantBacktestResult {
+  model: {
+    id: string
+    name: string
+    purpose: string
+    featureNames: string[]
+    featureWeights: Array<{ name: string; weight: number }>
+    trainingSamples: number
+    outOfSampleSamples: number
+    targetReturnThreshold: number
+    noLookahead: boolean
+  }
+  config: {
+    initialCapital: number
+    trainWindow: number
+    testRatio: number
+    buyThreshold: number
+    sellThreshold: number
+    targetReturnThreshold: number
+    slippageBps: number
+    maxOrderValue: number
+  }
+  current: {
+    date: string
+    probability: number
+    signal: QuantSignal
+    confidence: number
+    explanation: string
+  }
+  metrics: {
+    initialCapital: number
+    finalEquity: number
+    totalReturnPct: number
+    annualizedReturnPct: number
+    buyHoldReturnPct: number
+    maxDrawdownPct: number
+    sharpe: number
+    completedTrades: number
+    winRatePct: number
+    profitFactor: number | null
+    estimatedCosts: number
+    currentShares: number
+    directionalAccuracy: number
+  }
+  equityCurve: Array<{ date: string; equity: number; buyHold: number; probability: number; signal: QuantSignal }>
+  trades: Array<{ side: Side; date: string; price: number; quantity: number; probability: number; fees: number; pnl?: number; returnPct?: number }>
+  warnings: string[]
+}
+
+export interface RelativeValueResult {
+  date: string
+  window: number
+  threshold: number
+  zScore: number
+  divergencePct: number
+  signal: 'LEFT_RICH' | 'RIGHT_RICH' | 'NEUTRAL'
+  interpretation: string
+  series: Array<{ date: string; zScore: number }>
+  warnings: string[]
+}
+
+export interface QuantAutomationEvaluation {
+  at?: string
+  status: string
+  message?: string
+  signalDate?: string | null
+  signal?: QuantSignal
+  probability?: number
+  action?: string
+  reason?: string
+  orderId?: string | null
+}
+
+export interface QuantAutomation {
+  version: number
+  enabled: boolean
+  mode: 'paper'
+  strategyId: string
+  symbol: string
+  buyThreshold: number
+  sellThreshold: number
+  maxOrderValue: number
+  evaluationIntervalMinutes: number
+  lastEvaluation: QuantAutomationEvaluation | null
+  lastProcessedSignalDate: string | null
+  history: QuantAutomationEvaluation[]
+  updatedAt: string | null
 }

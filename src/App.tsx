@@ -1,6 +1,7 @@
 import {
   Bot,
   BriefcaseBusiness,
+  ChartNoAxesCombined,
   CircleDollarSign,
   ExternalLink,
   KeyRound,
@@ -24,6 +25,7 @@ import { LiveAccountPanel } from './components/LiveAccountPanel'
 import { MarketChart } from './components/MarketChart'
 import { OrderTicket } from './components/OrderTicket'
 import { PortfolioPanel } from './components/PortfolioPanel'
+import { QuantLab } from './components/QuantLab'
 import { SettingsDialog } from './components/SettingsDialog'
 import { Watchlist } from './components/Watchlist'
 import { changeClass, compact, money, percent, price, shortTime } from './format'
@@ -32,6 +34,7 @@ import type { Candle, HealthResponse, LiveAccountSnapshot, MarketResponse, Order
 const NAV_ITEMS = [
   { id: 'dashboard' as const, label: '总览', icon: LayoutDashboard },
   { id: 'research' as const, label: '研究', icon: Bot },
+  { id: 'quant' as const, label: '量化', icon: ChartNoAxesCombined },
   { id: 'trade' as const, label: '交易', icon: WalletCards },
   { id: 'account' as const, label: '账户', icon: BriefcaseBusiness },
   { id: 'connections' as const, label: '连接', icon: Link2 },
@@ -217,6 +220,8 @@ export function App() {
             <AiAssistant quote={quote} configured={Boolean(health?.deepseek.configured)} onOpenSettings={() => setSettingsOpen(true)} />
           </div>
         )}
+
+        {section === 'quant' && <QuantLab quote={quote} onPaperChanged={refreshAccount} />}
 
         {section === 'trade' && (
           <div className="trade-view">

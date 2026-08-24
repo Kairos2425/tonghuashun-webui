@@ -1,4 +1,4 @@
-import type { AiAnalysis, CandleResponse, HealthResponse, LiveAccountPosition, LiveAccountSnapshot, MarketResponse, OrderPreview, OrderRecord, Portfolio, Quote } from './types'
+import type { AiAnalysis, CandleResponse, HealthResponse, LiveAccountPosition, LiveAccountSnapshot, MarketResponse, OrderPreview, OrderRecord, Portfolio, QuantAutomation, QuantAutomationEvaluation, QuantBacktestResult, Quote, RelativeValueResult } from './types'
 
 interface ErrorPayload {
   error?: string
@@ -54,4 +54,12 @@ export const api = {
   saveDeepSeekKey: (apiKey: string) => request<{ ok: true; configured: boolean; source: string; protected: boolean }>('/api/settings/deepseek', { method: 'POST', body: JSON.stringify({ apiKey }) }),
   clearDeepSeekKey: () => request<{ ok: true; configured: boolean; source: string; protected: boolean }>('/api/settings/deepseek', { method: 'DELETE' }),
   analyze: (symbol: string, question: string) => request<{ ok: true; analysis: AiAnalysis }>('/api/ai/analyze', { method: 'POST', body: JSON.stringify({ symbol, question }) }).then((value) => value.analysis),
+  quantBacktest: (body: { symbol: string; buyThreshold: number; sellThreshold: number; maxOrderValue: number; slippageBps: number }) =>
+    request<{ ok: true; symbol: string; source: string; fetchedAt: string; result: QuantBacktestResult }>('/api/quant/backtest', { method: 'POST', body: JSON.stringify(body) }),
+  relativeValue: (left: string, right: string, window = 60, threshold = 2) =>
+    request<{ ok: true; left: string; right: string; source: string; result: RelativeValueResult }>(`/api/quant/relative-value?left=${encodeURIComponent(left)}&right=${encodeURIComponent(right)}&window=${window}&threshold=${threshold}`),
+  quantAutomation: () => request<{ ok: true; automation: QuantAutomation; liveAutomationLocked: boolean }>('/api/quant/automation'),
+  saveQuantAutomation: (body: { enabled: boolean; mode: 'paper'; symbol: string; buyThreshold: number; sellThreshold: number; maxOrderValue: number; evaluationIntervalMinutes: number }) =>
+    request<{ ok: true; automation: QuantAutomation; liveAutomationLocked: boolean }>('/api/quant/automation', { method: 'PUT', body: JSON.stringify(body) }),
+  runQuantAutomation: () => request<{ ok: true; evaluation: QuantAutomationEvaluation }>('/api/quant/automation/run', { method: 'POST' }).then((value) => value.evaluation),
 }
