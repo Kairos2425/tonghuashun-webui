@@ -1,6 +1,14 @@
 export type Section = 'dashboard' | 'research' | 'trade' | 'account' | 'connections'
 export type Side = 'BUY' | 'SELL'
 
+export interface QuantityRule {
+  buyMin: number
+  buyStep: number
+  sellMin: number
+  sellStep: number
+  oddLotThreshold: number
+}
+
 export interface Instrument {
   symbol: string
   name: string
@@ -9,6 +17,7 @@ export interface Instrument {
   risk: string
   priceTick?: number
   lotSize?: number
+  quantityRule?: QuantityRule
   tradable?: boolean
 }
 
@@ -91,6 +100,29 @@ export interface OrderRecord {
   brokerOrderId?: string | null
   fillPrice?: number | null
   fillQuantity?: number
+  note?: string
+  reconciliationCount?: number
+}
+
+export interface LiveAccountPosition {
+  symbol: string
+  name: string
+  quantity: number
+  availableQuantity: number
+  avgCost: number
+}
+
+export interface LiveAccountSnapshot {
+  configured: boolean
+  fresh: boolean
+  protected: boolean
+  source: 'manual_gtja'
+  cash: number | null
+  totalAssets: number | null
+  positions: LiveAccountPosition[]
+  updatedAt: string | null
+  tradingDate: string | null
+  ageMinutes: number | null
 }
 
 export interface Portfolio {

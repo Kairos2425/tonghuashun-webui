@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url'
 import { getCandles, getInstrument, getMarketSnapshot, getSecurityQuote, listInstruments, normalizeSymbol } from './core/market.mjs'
 import { PaperBroker } from './core/paper-broker.mjs'
 import { ManualOrderStore } from './core/manual-orders.mjs'
+import { LiveAccountStore } from './core/live-account.mjs'
 import { SecretStore } from './core/secrets.mjs'
 import { createOrderPreview, DEFAULT_RISK_CONFIG, validateOrder } from './core/risk.mjs'
 import { analyzeWithDeepSeek } from './core/deepseek.mjs'
@@ -27,6 +28,7 @@ const riskConfig = {
 
 const paperBroker = new PaperBroker(join(dataDir, 'paper-account.json'))
 const manualOrders = new ManualOrderStore(join(dataDir, 'manual-orders.json'), join(dataDir, 'audit.jsonl'))
+const liveAccount = new LiveAccountStore(join(dataDir, 'live-account.dpapi'))
 const secrets = new SecretStore(join(dataDir, 'deepseek-key.dpapi'))
 const previews = new Map()
 
@@ -106,6 +108,26 @@ async function handleApi(request, response, url) {
     const market = await getMarketSnapshot()
     const portfolio = await paperBroker.portfolio(market.quotes)
     return sendJson(response, 200, { ok: true, portfolio })
+  }
+
+  if (request.method === 'GET' && url.pathname === '/api/live-account') {
+    return sendJson(response, 200, { ok: true, account: await liveAccount.get() })
+  }
+
+  if (request.method === 'PUT' && url.pathname === '/api/live-account') {
+    const account = await liveAccount.set(await readJsonBody(request))
+    await manualOrders.audit('live_account_snapshot_updated', {
+      tradingDate: account.tradingDate,
+      positionsCount: account.positions.length,
+      protected: true,
+    })
+    return sendJson(response, 200, { ok: true, account })
+  }
+
+  if (request.method === 'DELETE' && url.pathname === '/api/live-account') {
+    const account = await liveAccount.clear()
+    await manualOrders.audit('live_account_snapshot_cleared', { protected: true })
+    return sendJson(response, 200, { ok: true, account })
   }
 
   if (request.method === 'POST' && url.pathname === '/api/portfolio/reset') {
@@ -275,6 +297,7 @@ async function buildRiskContext(order, market, connector) {
     quotePrice: quote?.price,
     priceTick: instrument?.priceTick,
     lotSize: instrument?.lotSize,
+    quantityRule: instrument?.quantityRule,
     tradable: instrument?.tradable,
     liveEnabled,
     brokerConnected: connector.canSubmit,
@@ -294,13 +317,30 @@ async function buildRiskContext(order, market, connector) {
     }
   }
   const records = await manualOrders.list()
+  const liveSnapshot = order.mode === 'manual_live' ? await liveAccount.get() : null
+  const mirroredPosition = liveSnapshot?.fresh
+    ? liveSnapshot.positions.find((item) => item.symbol === order.symbol)
+    : null
   return {
     ...base,
+    accountSnapshotConfigured: Boolean(liveSnapshot?.configured),
+    accountSnapshotFresh: Boolean(liveSnapshot?.fresh),
+    ...(liveSnapshot?.fresh ? {
+      accountSource: 'manual_gtja',
+      availableCash: liveSnapshot.cash,
+      availableQuantity: mirroredPosition?.availableQuantity ?? 0,
+      totalAssets: liveSnapshot.totalAssets,
+      currentPositionValue: mirroredPosition
+        ? mirroredPosition.quantity * (quote?.price ?? mirroredPosition.avgCost)
+        : 0,
+    } : {}),
     dailyValue: records
       .filter((item) => item.broker === order.broker)
       .filter((item) => !['cancelled', 'rejected'].includes(item.status))
       .filter((item) => tradingDate(item.submittedAt) === tradingDate())
-      .reduce((sum, item) => sum + Number(item.amount || 0), 0),
+      .reduce((sum, item) => sum + (item.status === 'partially_filled_cancelled'
+        ? Number(item.fillPrice || 0) * Number(item.fillQuantity || 0)
+        : Number(item.amount || 0)), 0),
   }
 }
 

@@ -2,11 +2,12 @@ import { AlertTriangle, Check, CheckCircle2, Clipboard, ExternalLink, LoaderCirc
 import { useEffect, useState } from 'react'
 import { api, ApiError } from '../api'
 import { money, price, sideLabel } from '../format'
-import type { Connector, OrderPreview, OrderRecord, Portfolio, Quote, RiskConfig, Side } from '../types'
+import type { Connector, LiveAccountSnapshot, OrderPreview, OrderRecord, Portfolio, QuantityRule, Quote, RiskConfig, Side } from '../types'
 
 interface Props {
   quote?: Quote
   portfolio?: Portfolio
+  liveAccount?: LiveAccountSnapshot
   connectors: Connector[]
   broker: string
   riskConfig?: RiskConfig
@@ -14,7 +15,7 @@ interface Props {
   onChanged: () => Promise<void>
 }
 
-export function OrderTicket({ quote, portfolio, connectors, broker, riskConfig, onBrokerChange, onChanged }: Props) {
+export function OrderTicket({ quote, portfolio, liveAccount, connectors, broker, riskConfig, onBrokerChange, onChanged }: Props) {
   const [side, setSide] = useState<Side>('BUY')
   const [limitPrice, setLimitPrice] = useState(0)
   const [quantity, setQuantity] = useState(100)
@@ -26,18 +27,30 @@ export function OrderTicket({ quote, portfolio, connectors, broker, riskConfig, 
 
   useEffect(() => {
     if (quote) setLimitPrice(quote.price)
+    setQuantity(quote?.quantityRule?.buyMin ?? quote?.lotSize ?? 100)
     setPreview(null)
     setSubmitted(null)
   }, [quote?.symbol])
 
   const connector = connectors.find((item) => item.id === broker) ?? connectors[0]
   const position = portfolio?.positions.find((item) => item.symbol === quote?.symbol)
+  const mirroredPosition = liveAccount?.fresh ? liveAccount.positions.find((item) => item.symbol === quote?.symbol) : undefined
   const estimated = limitPrice * quantity
   const priceTick = quote?.priceTick ?? (quote?.kind.includes('ETF') ? 0.001 : 0.01)
+  const quantityRule = quote?.quantityRule ?? defaultQuantityRule()
+  const quantityMinimum = side === 'BUY' ? quantityRule.buyMin : quantityRule.sellMin
+  const quantityStep = side === 'BUY' ? quantityRule.buyStep : quantityRule.sellStep
   const manualLive = connector?.kind === 'manual_live'
   const apiLive = connector?.kind === 'live_api'
   const brokerOptions = connectors.filter((item) => ['paper', 'gtja-manual', 'gtja-api', 'supermind'].includes(item.id))
   const canPreview = Boolean(quote && limitPrice > 0 && quantity > 0 && !busy)
+
+  const chooseSide = (next: Side) => {
+    setSide(next)
+    setQuantity(next === 'BUY' ? quantityRule.buyMin : quantityRule.sellMin)
+    setPreview(null)
+    setSubmitted(null)
+  }
 
   const createPreview = async () => {
     if (!quote || !canPreview) return
@@ -111,8 +124,8 @@ export function OrderTicket({ quote, portfolio, connectors, broker, riskConfig, 
 
       <div className="ticket-grid">
         <div className="side-control segmented" role="group" aria-label="买卖方向">
-          <button type="button" className={side === 'BUY' ? 'active buy' : ''} onClick={() => setSide('BUY')}>买入</button>
-          <button type="button" className={side === 'SELL' ? 'active sell' : ''} onClick={() => setSide('SELL')}>卖出</button>
+          <button type="button" className={side === 'BUY' ? 'active buy' : ''} onClick={() => chooseSide('BUY')}>买入</button>
+          <button type="button" className={side === 'SELL' ? 'active sell' : ''} onClick={() => chooseSide('SELL')}>卖出</button>
         </div>
         <label className="field">
           <span>限价</span>
@@ -126,11 +139,13 @@ export function OrderTicket({ quote, portfolio, connectors, broker, riskConfig, 
         <label className="field">
           <span>数量</span>
           <div className="number-input">
-            <button type="button" title="减少一手" onClick={() => setQuantity((value) => Math.max(100, value - 100))}><Minus size={14} /></button>
-            <input type="number" min="100" step="100" value={quantity} onChange={(event) => setQuantity(Math.max(0, Number(event.target.value)))} />
-            <button type="button" title="增加一手" onClick={() => setQuantity((value) => value + 100)}><Plus size={14} /></button>
+            <button type="button" title="减少一个递增单位" onClick={() => setQuantity((value) => Math.max(quantityMinimum, value - quantityStep))}><Minus size={14} /></button>
+            <input type="number" min={quantityMinimum} step={quantityStep} value={quantity} onChange={(event) => setQuantity(Math.max(0, Number(event.target.value)))} />
+            <button type="button" title="增加一个递增单位" onClick={() => setQuantity((value) => value + quantityStep)}><Plus size={14} /></button>
           </div>
-          <small>{side === 'SELL' ? (connector?.kind === 'paper' ? `模拟可卖 ${position?.availableQuantity ?? 0}` : '真实可卖数量需在券商端核对') : `${quantity / 100 || 0} 手`}</small>
+          <small>{side === 'SELL'
+            ? (connector?.kind === 'paper' ? `模拟可卖 ${position?.availableQuantity ?? 0}` : liveAccount?.fresh ? `今日镜像可卖 ${mirroredPosition?.availableQuantity ?? 0}` : '真实可卖数量需在券商端核对')
+            : quantityRuleLabel(quantityRule)}</small>
         </label>
         <div className="ticket-estimate">
           <span>估算金额</span>
@@ -246,4 +261,12 @@ function brokerLabel(id: string) {
   if (id === 'gtja-api') return '君弘 API'
   if (id === 'supermind') return '同花顺'
   return id
+}
+
+function defaultQuantityRule(): QuantityRule {
+  return { buyMin: 100, buyStep: 100, sellMin: 100, sellStep: 100, oddLotThreshold: 100 }
+}
+
+function quantityRuleLabel(rule: QuantityRule) {
+  return rule.buyStep === 1 ? `最低 ${rule.buyMin}，按 1 递增` : `${rule.buyMin} 股（份）一手`
 }

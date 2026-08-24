@@ -146,3 +146,37 @@ test('君弘人工确认实盘完成预览、确认和审计回填链路', async
   assert.equal(reconcile.status, 200)
   assert.equal((await reconcile.json()).order.status, 'filled')
 })
+
+test('今日君弘账户镜像参与人工实盘的余额与持仓阻断', async (t) => {
+  const { baseUrl } = await startServer(t)
+  const savedResponse = await fetch(`${baseUrl}/api/live-account`, {
+    method: 'PUT',
+    headers: mutationHeaders(),
+    body: JSON.stringify({
+      cash: 400,
+      totalAssets: 1_000,
+      positions: [{ symbol: '510300.SH', name: '沪深300ETF', quantity: 100, availableQuantity: 0, avgCost: 4.7 }],
+    }),
+  })
+  assert.equal(savedResponse.status, 200)
+  const saved = await savedResponse.json()
+  assert.equal(saved.account.configured, true)
+  assert.equal(saved.account.fresh, true)
+  assert.equal(saved.account.protected, true)
+
+  const buyPreview = await fetch(`${baseUrl}/api/orders/preview`, {
+    method: 'POST',
+    headers: mutationHeaders(),
+    body: JSON.stringify({ symbol: '510300.SH', side: 'BUY', price: 4.75, quantity: 100, broker: 'gtja-manual' }),
+  }).then((response) => response.json())
+  assert.equal(buyPreview.preview.ok, false)
+  assert.equal(buyPreview.preview.checks.some((check) => check.code === 'cash' && check.level === 'block'), true)
+
+  const sellPreview = await fetch(`${baseUrl}/api/orders/preview`, {
+    method: 'POST',
+    headers: mutationHeaders(),
+    body: JSON.stringify({ symbol: '510300.SH', side: 'SELL', price: 4.75, quantity: 100, broker: 'gtja-manual' }),
+  }).then((response) => response.json())
+  assert.equal(sellPreview.preview.ok, false)
+  assert.equal(sellPreview.preview.checks.some((check) => check.code === 'position' && check.level === 'block'), true)
+})

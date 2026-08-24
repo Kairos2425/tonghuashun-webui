@@ -91,9 +91,28 @@ test('部分成交与全部成交使用不同状态', async (t) => {
   assert.equal(partial.status, 'partially_filled')
   assert.equal(partial.fillQuantity, 100)
 
+  const completed = await store.reconcile(partialRecord.id, {
+    status: 'filled',
+    fillPrice: 4.78,
+    fillQuantity: 200,
+    note: '余量随后成交',
+  })
+  assert.equal(completed.status, 'filled')
+  assert.equal(completed.reconciliationCount, 2)
+  assert.equal(completed.note, '余量随后成交')
+
   const fullRecord = await store.create(order, { ...preview, id: 'preview-full' })
   await assert.rejects(
     () => store.reconcile(fullRecord.id, { status: 'filled', fillPrice: 4.79, fillQuantity: 100 }),
     /请选择部分成交/,
   )
+})
+
+test('部分成交后可将未成交余量标记为已撤', async (t) => {
+  const store = await fixture(t)
+  const record = await store.create(order, { ...preview, id: 'preview-cancel-rest' })
+  await store.reconcile(record.id, { status: 'partially_filled', fillPrice: 4.79, fillQuantity: 100 })
+  const terminal = await store.reconcile(record.id, { status: 'partially_filled_cancelled', fillPrice: 4.79, fillQuantity: 100 })
+  assert.equal(terminal.status, 'partially_filled_cancelled')
+  await assert.rejects(() => store.reconcile(record.id, { status: 'filled', fillPrice: 4.79, fillQuantity: 200 }), /终态/)
 })

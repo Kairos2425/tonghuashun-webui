@@ -67,14 +67,19 @@ export function validateOrder(input, context = {}, config = DEFAULT_RISK_CONFIG)
     if (Math.abs(tickUnits - Math.round(tickUnits)) > 1e-7) block('price_tick', `限价必须按 ${priceTick.toFixed(priceTick < 0.01 ? 3 : 2)} 元一档输入`)
     else pass('price_tick', `价格档位 ${priceTick.toFixed(priceTick < 0.01 ? 3 : 2)} 元`)
   }
-  const lotSize = Number.isInteger(context.lotSize) && context.lotSize > 0 ? context.lotSize : 100
+  const quantityRule = context.quantityRule ?? { buyMin: 100, buyStep: 100, sellMin: 100, sellStep: 100, oddLotThreshold: 100 }
   if (!Number.isInteger(order.quantity) || order.quantity <= 0) block('quantity', '数量必须是正整数')
-  else if (order.side === 'BUY' && order.quantity % lotSize !== 0) block('lot', `买入数量必须是 ${lotSize} 的整数倍`)
-  else if (order.side === 'SELL' && order.quantity % lotSize !== 0) {
-    const availableQuantity = finiteNumber(context.availableQuantity)
-    if (Number.isFinite(availableQuantity) && order.quantity !== availableQuantity) block('odd_lot', '零股卖出需一次性卖出全部可卖余量')
-    else warn('odd_lot', '零股卖出规则因品种而异，请在君弘确认必须一次性卖出全部余量')
-  } else pass('lot', `${order.quantity / lotSize} 手`)
+  else if (order.side === 'BUY') {
+    const minimum = positiveInteger(quantityRule.buyMin, 100)
+    const step = positiveInteger(quantityRule.buyStep, 100)
+    if (order.quantity < minimum || (order.quantity - minimum) % step !== 0) {
+      block('lot', step === 1 ? `买入数量至少 ${minimum} 股（份），之后可按 1 股（份）递增` : `买入数量必须是 ${minimum} 股（份）或其整数倍`)
+    } else {
+      pass('lot', step === 1 ? `数量规则：最低 ${minimum}，按 1 递增` : `${order.quantity / minimum} 手`)
+    }
+  } else if (order.side === 'SELL') {
+    validateSellQuantity(order.quantity, context, quantityRule, { block, warn, pass })
+  }
 
   const amount = Number.isFinite(order.price * order.quantity) ? order.price * order.quantity : 0
   if (amount > config.maxOrderValue) block('order_value', `单笔金额超过新手保护上限 ¥${config.maxOrderValue.toLocaleString('zh-CN')}`)
@@ -99,16 +104,22 @@ export function validateOrder(input, context = {}, config = DEFAULT_RISK_CONFIG)
     warn('quote_missing', '没有真实公开参考价，必须在君弘委托页重新核价')
   }
 
+  if (context.accountSnapshotConfigured && !context.accountSnapshotFresh && order.mode === 'manual_live') {
+    warn('account_snapshot_stale', '君弘账户镜像不是今日数据，本次不使用其中的资金和持仓，请先更新')
+  }
+
   if (order.side === 'BUY') {
     const cash = finiteNumber(context.availableCash)
     const fees = estimateFees(order, config)
     if (!Number.isFinite(cash)) warn('cash_unknown', '工作台未读取君弘余额，请在券商委托页核对可用资金')
-    else if (amount + fees.total > cash) block('cash', '可用资金不足（已计入估算费用）')
+    else if (amount + fees.total > cash) block('cash', context.accountSource === 'manual_gtja' ? '按今日君弘镜像估算，可用资金不足（已计入估算费用）' : '可用资金不足（已计入估算费用）')
+    else if (context.accountSource === 'manual_gtja') warn('cash_snapshot', '按今日手工镜像估算资金充足，仍需在君弘核对实时余额')
     else pass('cash', '可用资金校验通过')
   } else if (order.side === 'SELL') {
     const availableQuantity = finiteNumber(context.availableQuantity)
     if (!Number.isFinite(availableQuantity)) warn('position_unknown', '工作台未读取君弘持仓，请在券商委托页核对可卖数量与 T+1')
-    else if (order.quantity > availableQuantity) block('position', '可卖数量不足，可能包含当日买入的 T+1 锁定份额')
+    else if (order.quantity > availableQuantity) block('position', context.accountSource === 'manual_gtja' ? '按今日君弘镜像估算，可卖数量不足' : '可卖数量不足，可能包含当日买入的 T+1 锁定份额')
+    else if (context.accountSource === 'manual_gtja') warn('position_snapshot', '按今日手工镜像估算可卖数量足够，仍需在君弘核对 T+1 与实时可卖')
     else pass('position', '可卖数量校验通过')
   }
 
@@ -117,6 +128,7 @@ export function validateOrder(input, context = {}, config = DEFAULT_RISK_CONFIG)
   if (order.side === 'BUY' && totalAssets > 0 && Number.isFinite(currentPositionValue)) {
     const ratio = (currentPositionValue + amount) / totalAssets
     if (ratio > config.maxPositionRatio) warn('concentration', `成交后单一标的约占总资产 ${(ratio * 100).toFixed(1)}%，高于新手参考线 ${(config.maxPositionRatio * 100).toFixed(0)}%`)
+    else if (context.accountSource === 'manual_gtja') warn('concentration_snapshot', `按今日手工镜像估算，成交后单一标的约占总资产 ${(ratio * 100).toFixed(1)}%`)
     else pass('concentration', `成交后单一标的约占总资产 ${(ratio * 100).toFixed(1)}%`)
   } else if (order.side === 'BUY' && order.mode !== 'paper') {
     warn('concentration_unknown', '工作台未读取君弘总资产，请在券商端复核本单占账户资产比例')
@@ -148,4 +160,32 @@ export function createOrderPreview(input, context = {}, config = DEFAULT_RISK_CO
 
 export function roundMoney(value) {
   return Math.round((value + Number.EPSILON) * 100) / 100
+}
+
+function validateSellQuantity(quantity, context, rule, checks) {
+  const minimum = positiveInteger(rule.sellMin, 100)
+  const step = positiveInteger(rule.sellStep, 100)
+  const oddLotThreshold = positiveInteger(rule.oddLotThreshold, minimum)
+  const standard = quantity >= minimum && (quantity - minimum) % step === 0
+  if (standard) {
+    checks.pass('lot', step === 1 ? `卖出数量最低 ${minimum}，按 1 递增` : '整手卖出数量有效')
+    return
+  }
+
+  const available = finiteNumber(context.availableQuantity)
+  if (Number.isFinite(available)) {
+    const oddBalance = available % oddLotThreshold
+    const includesWholeOddBalance = oddBalance > 0 && quantity <= available && quantity % oddLotThreshold === oddBalance
+    if (includesWholeOddBalance || (available < minimum && quantity === available)) {
+      checks.pass('odd_lot', '零股余量已一次性包含在本次卖出中')
+    } else {
+      checks.block('odd_lot', `卖出数量不符合最低 ${minimum}、递增 ${step} 或一次性卖出全部零股余量的规则`)
+    }
+  } else {
+    checks.warn('odd_lot', `非标准卖出数量需在君弘确认：最低 ${minimum}，零股余量必须一次性卖出`)
+  }
+}
+
+function positiveInteger(value, fallback) {
+  return Number.isInteger(value) && value > 0 ? value : fallback
 }

@@ -21,6 +21,14 @@ test('动态证券定义区分 ETF 与股票价格档位', () => {
   assert.equal(stock.kind, 'A 股')
   assert.equal(stock.tradable, true)
   assert.equal(beijing.exchange, '北京')
+  assert.deepEqual(stock.quantityRule, { buyMin: 100, buyStep: 100, sellMin: 100, sellStep: 100, oddLotThreshold: 100 })
+  assert.equal(beijing.quantityRule.buyStep, 1)
+})
+
+test('科创板最低 200 股后按 1 股递增', () => {
+  const star = getInstrument('688001')
+  assert.equal(star.kind, '科创板 A 股')
+  assert.deepEqual(star.quantityRule, { buyMin: 200, buyStep: 1, sellMin: 200, sellStep: 1, oddLotThreshold: 200 })
 })
 
 test('指数、可转债等非目标品种只允许观察', () => {

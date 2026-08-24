@@ -1830,6 +1830,207 @@ textarea:disabled {
   gap: 12px;
 }
 
+.live-account-panel {
+  overflow: hidden;
+}
+
+.mirror-status {
+  display: inline-flex;
+  min-height: 24px;
+  padding: 3px 7px;
+  align-items: center;
+  border-radius: 4px;
+  background: var(--amber-soft);
+  color: var(--amber);
+  font-size: 9px;
+  gap: 4px;
+}
+
+.mirror-status.fresh {
+  background: var(--green-soft);
+  color: var(--green);
+}
+
+.mirror-summary {
+  display: grid;
+  border-top: 1px solid var(--line);
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.mirror-summary > div {
+  display: flex;
+  min-width: 0;
+  min-height: 56px;
+  padding: 8px 11px;
+  justify-content: center;
+  flex-direction: column;
+  border-right: 1px solid var(--line);
+  gap: 3px;
+}
+
+.mirror-summary > div:last-child {
+  border-right: 0;
+}
+
+.mirror-summary span,
+.mirror-summary small {
+  color: var(--muted);
+  font-size: 8px;
+}
+
+.mirror-summary strong {
+  overflow: hidden;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mirror-empty {
+  display: flex;
+  min-height: 72px;
+  padding: 12px;
+  align-items: center;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  gap: 10px;
+}
+
+.mirror-empty > span,
+.mirror-position-row > span {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+}
+
+.mirror-empty strong,
+.mirror-position-row strong {
+  color: var(--ink);
+  font-size: 10px;
+}
+
+.mirror-empty small,
+.mirror-position-row small {
+  margin-top: 2px;
+  color: var(--faint);
+  font-size: 8px;
+}
+
+.mirror-actions {
+  display: flex;
+  min-height: 48px;
+  padding: 8px 12px;
+  align-items: center;
+  justify-content: space-between;
+  border-top: 1px solid var(--line);
+  background: var(--surface-soft);
+  gap: 10px;
+}
+
+.mirror-actions > div {
+  display: flex;
+  align-items: center;
+  color: var(--muted);
+  font-size: 8px;
+  line-height: 14px;
+  gap: 5px;
+}
+
+.mirror-actions svg {
+  flex: 0 0 auto;
+}
+
+.mirror-positions {
+  border-top: 1px solid var(--line);
+}
+
+.mirror-position-row {
+  display: grid;
+  min-height: 42px;
+  padding: 6px 12px;
+  align-items: center;
+  border-top: 1px solid #edf0f3;
+  grid-template-columns: minmax(160px, 1fr) 120px 100px;
+  gap: 10px;
+}
+
+.mirror-position-row:first-child {
+  border-top: 0;
+}
+
+.mirror-position-head {
+  min-height: 30px;
+  background: var(--surface-soft);
+  color: var(--muted);
+  font-size: 8px;
+}
+
+.dialog.live-account-dialog {
+  width: min(920px, 100%);
+}
+
+.mirror-form-note {
+  display: flex;
+  margin: 12px;
+  padding: 9px 10px;
+  align-items: center;
+  border: 1px solid #b9d0ec;
+  border-radius: 5px;
+  background: var(--blue-soft);
+  color: #285986;
+  font-size: 9px;
+  gap: 6px;
+}
+
+.mirror-money-fields {
+  display: grid;
+  margin: 0 12px 12px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.mirror-editor-head {
+  display: flex;
+  min-height: 42px;
+  padding: 7px 12px;
+  align-items: center;
+  justify-content: space-between;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-soft);
+  font-size: 10px;
+}
+
+.mirror-editor-list {
+  max-height: 330px;
+  padding: 0 12px;
+  overflow: auto;
+}
+
+.mirror-editor-row {
+  display: grid;
+  padding: 10px 0;
+  align-items: end;
+  border-bottom: 1px solid var(--line);
+  grid-template-columns: 1.05fr 1.05fr 0.65fr 0.65fr 0.75fr 34px;
+  gap: 8px;
+}
+
+.mirror-editor-row:last-child {
+  border-bottom: 0;
+}
+
+.small-dialog .field > textarea,
+.live-account-dialog .field > textarea {
+  height: auto;
+  min-height: 68px;
+  padding-top: 8px;
+  resize: vertical;
+}
+
+.dialog-inline-error {
+  margin: 0 12px 12px;
+}
+
 .portfolio-panel.expanded .asset-summary {
   grid-template-columns: 1.3fr 1fr 1fr;
 }
@@ -1933,6 +2134,11 @@ textarea:disabled {
 .order-status.partially_filled {
   background: var(--amber-soft);
   color: var(--amber);
+}
+
+.order-status.partially_filled_cancelled {
+  background: #fff0e5;
+  color: #a35216;
 }
 
 .order-status.cancelled,
@@ -2361,7 +2567,7 @@ textarea:disabled {
 
 .status-segmented {
   margin: 12px;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(78px, 1fr));
 }
 
 .reconcile-fields {
@@ -2737,6 +2943,22 @@ textarea:disabled {
   .trade-view {
     grid-template-columns: minmax(0, 1fr);
   }
+
+  .mirror-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .mirror-summary > div:nth-child(2n) {
+    border-right: 0;
+  }
+
+  .mirror-summary > div:nth-child(-n + 2) {
+    border-bottom: 1px solid var(--line);
+  }
+
+  .mirror-editor-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 560px) {
@@ -2810,6 +3032,24 @@ textarea:disabled {
   .asset-summary,
   .portfolio-panel.expanded .asset-summary {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .mirror-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .mirror-money-fields,
+  .mirror-editor-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .mirror-position-row {
+    min-width: 520px;
+  }
+
+  .mirror-positions {
+    overflow-x: auto;
   }
 
   .asset-summary > div {

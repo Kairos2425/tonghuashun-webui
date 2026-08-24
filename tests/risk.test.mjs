@@ -137,3 +137,65 @@ test('预览包含短时效和逐单确认文本', () => {
   assert.ok(preview.expiresAt >= before + 299_000)
   assert.deepEqual(estimateFees(paperBuy), preview.fees)
 })
+
+test('主板、科创板和北交所使用各自的数量递增规则', () => {
+  const mainBlocked = validateOrder({ ...paperBuy, symbol: '600000.SH', price: 3, quantity: 150 }, {
+    quotePrice: 3,
+    quantityRule: { buyMin: 100, buyStep: 100, sellMin: 100, sellStep: 100, oddLotThreshold: 100 },
+    availableCash: 10_000,
+  })
+  assert.equal(mainBlocked.checks.some((check) => check.code === 'lot' && check.level === 'block'), true)
+
+  const starValid = validateOrder({ ...paperBuy, symbol: '688001.SH', price: 3, quantity: 201 }, {
+    quotePrice: 3,
+    quantityRule: { buyMin: 200, buyStep: 1, sellMin: 200, sellStep: 1, oddLotThreshold: 200 },
+    availableCash: 10_000,
+  })
+  assert.equal(starValid.checks.some((check) => check.code === 'lot' && check.level === 'pass'), true)
+
+  const beijingValid = validateOrder({ ...paperBuy, symbol: '920001.BJ', price: 3, quantity: 101 }, {
+    quotePrice: 3,
+    quantityRule: { buyMin: 100, buyStep: 1, sellMin: 100, sellStep: 1, oddLotThreshold: 100 },
+    availableCash: 10_000,
+  })
+  assert.equal(beijingValid.checks.some((check) => check.code === 'lot' && check.level === 'pass'), true)
+})
+
+test('卖出零股必须包含全部零股余量', () => {
+  const rule = { buyMin: 100, buyStep: 100, sellMin: 100, sellStep: 100, oddLotThreshold: 100 }
+  const valid = validateOrder({ ...paperBuy, side: 'SELL', quantity: 199 }, { quotePrice: 4.8, quantityRule: rule, availableQuantity: 299 })
+  assert.equal(valid.checks.some((check) => check.code === 'odd_lot' && check.level === 'pass'), true)
+
+  const invalid = validateOrder({ ...paperBuy, side: 'SELL', quantity: 198 }, { quotePrice: 4.8, quantityRule: rule, availableQuantity: 299 })
+  assert.equal(invalid.checks.some((check) => check.code === 'odd_lot' && check.level === 'block'), true)
+})
+
+test('人工账户镜像只能提供保守校验，不能伪装成券商实时查询', () => {
+  const enough = validateOrder({ ...paperBuy, mode: 'manual_live', broker: 'gtja-manual' }, {
+    quotePrice: 4.8,
+    availableCash: 2_000,
+    totalAssets: 10_000,
+    currentPositionValue: 0,
+    accountSource: 'manual_gtja',
+    accountSnapshotConfigured: true,
+    accountSnapshotFresh: true,
+  })
+  assert.equal(enough.checks.some((check) => check.code === 'cash_snapshot' && check.level === 'warn'), true)
+  assert.equal(enough.checks.some((check) => check.code === 'cash' && check.level === 'pass'), false)
+
+  const insufficient = validateOrder({ ...paperBuy, mode: 'manual_live', broker: 'gtja-manual' }, {
+    quotePrice: 4.8,
+    availableCash: 900,
+    accountSource: 'manual_gtja',
+    accountSnapshotConfigured: true,
+    accountSnapshotFresh: true,
+  })
+  assert.equal(insufficient.checks.some((check) => check.code === 'cash' && check.level === 'block'), true)
+
+  const stale = validateOrder({ ...paperBuy, mode: 'manual_live', broker: 'gtja-manual' }, {
+    quotePrice: 4.8,
+    accountSnapshotConfigured: true,
+    accountSnapshotFresh: false,
+  })
+  assert.equal(stale.checks.some((check) => check.code === 'account_snapshot_stale' && check.level === 'warn'), true)
+})

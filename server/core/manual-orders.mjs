@@ -49,24 +49,30 @@ export class ManualOrderStore {
     const orders = await this.list()
     const index = orders.findIndex((item) => item.id === id)
     if (index < 0) throw withStatus('找不到待回填委托', 404)
-    if (!['filled', 'partially_filled', 'cancelled', 'rejected'].includes(input?.status)) throw withStatus('回填状态无效', 400)
+    if (!['filled', 'partially_filled', 'partially_filled_cancelled', 'cancelled', 'rejected'].includes(input?.status)) throw withStatus('回填状态无效', 400)
     const previous = orders[index]
-    if (previous.status !== 'awaiting_broker_confirmation') throw withStatus('该委托已经回填，不能重复修改', 409)
-    const hasFill = ['filled', 'partially_filled'].includes(input.status)
+    if (!['awaiting_broker_confirmation', 'partially_filled'].includes(previous.status)) throw withStatus('该委托已进入终态，不能重复修改', 409)
+    if (previous.status === 'partially_filled' && ['cancelled', 'rejected'].includes(input.status)) {
+      throw withStatus('已有部分成交，请选择“余量已撤”或继续回填成交', 400)
+    }
+    const hasFill = ['filled', 'partially_filled', 'partially_filled_cancelled'].includes(input.status)
     const fillPrice = hasFill ? positiveNumber(input.fillPrice, '成交价') : null
-    const fillQuantity = hasFill ? positiveInteger(input.fillQuantity ?? previous.quantity, '成交数量') : 0
+    const fallbackQuantity = input.status === 'filled' ? previous.quantity : previous.fillQuantity
+    const fillQuantity = hasFill ? positiveInteger(input.fillQuantity ?? fallbackQuantity, '累计成交数量') : 0
     if (hasFill && fillQuantity > previous.quantity) throw withStatus('成交数量不能超过草稿委托数量', 400)
+    if (hasFill && fillQuantity < Number(previous.fillQuantity || 0)) throw withStatus('累计成交数量不能小于上次回填数量', 400)
     if (input.status === 'filled' && fillQuantity !== previous.quantity) throw withStatus('全部成交的数量必须等于委托数量；不足时请选择部分成交', 400)
-    if (input.status === 'partially_filled' && fillQuantity >= previous.quantity) throw withStatus('部分成交数量必须小于委托数量', 400)
+    if (['partially_filled', 'partially_filled_cancelled'].includes(input.status) && fillQuantity >= previous.quantity) throw withStatus('部分成交数量必须小于委托数量', 400)
     if (hasFill && previous.side === 'BUY' && fillPrice > previous.price) throw withStatus('限价买入的成交价不能高于草稿限价，请核对录入', 400)
     if (hasFill && previous.side === 'SELL' && fillPrice < previous.price) throw withStatus('限价卖出的成交价不能低于草稿限价，请核对录入', 400)
     const updated = {
       ...previous,
       status: input.status,
-      brokerOrderId: String(input.brokerOrderId ?? '').trim().slice(0, 80) || null,
+      brokerOrderId: String(input.brokerOrderId ?? previous.brokerOrderId ?? '').trim().slice(0, 80) || null,
       fillPrice,
       fillQuantity,
-      note: String(input.note ?? '').trim().slice(0, 300),
+      note: String(input.note ?? previous.note ?? '').trim().slice(0, 300),
+      reconciliationCount: Number(previous.reconciliationCount || 0) + 1,
       reconciledAt: new Date().toISOString(),
     }
     orders[index] = updated

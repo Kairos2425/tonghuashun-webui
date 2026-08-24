@@ -20,13 +20,14 @@ import { api } from './api'
 import { AiAssistant } from './components/AiAssistant'
 import { ConnectionCenter } from './components/ConnectionCenter'
 import { ManualOrders } from './components/ManualOrders'
+import { LiveAccountPanel } from './components/LiveAccountPanel'
 import { MarketChart } from './components/MarketChart'
 import { OrderTicket } from './components/OrderTicket'
 import { PortfolioPanel } from './components/PortfolioPanel'
 import { SettingsDialog } from './components/SettingsDialog'
 import { Watchlist } from './components/Watchlist'
 import { changeClass, compact, money, percent, price, shortTime } from './format'
-import type { Candle, HealthResponse, MarketResponse, OrderRecord, Portfolio, Quote, Section } from './types'
+import type { Candle, HealthResponse, LiveAccountSnapshot, MarketResponse, OrderRecord, Portfolio, Quote, Section } from './types'
 
 const NAV_ITEMS = [
   { id: 'dashboard' as const, label: '总览', icon: LayoutDashboard },
@@ -42,6 +43,7 @@ export function App() {
   const [health, setHealth] = useState<HealthResponse | null>(null)
   const [portfolio, setPortfolio] = useState<Portfolio | null>(null)
   const [manualOrders, setManualOrders] = useState<OrderRecord[]>([])
+  const [liveAccount, setLiveAccount] = useState<LiveAccountSnapshot | null>(null)
   const [candles, setCandles] = useState<Candle[]>([])
   const [selected, setSelected] = useState('510300.SH')
   const [customSymbols, setCustomSymbols] = useState<string[]>(readCustomSymbols)
@@ -53,9 +55,10 @@ export function App() {
   const [error, setError] = useState('')
 
   const refreshAccount = useCallback(async () => {
-    const [nextPortfolio, nextManual] = await Promise.all([api.portfolio(), api.manualOrders()])
+    const [nextPortfolio, nextManual, nextLiveAccount] = await Promise.all([api.portfolio(), api.manualOrders(), api.liveAccount()])
     setPortfolio(nextPortfolio)
     setManualOrders(nextManual)
+    setLiveAccount(nextLiveAccount)
   }, [])
 
   const refreshHealth = useCallback(async () => {
@@ -70,13 +73,14 @@ export function App() {
 
   useEffect(() => {
     let active = true
-    Promise.all([api.health(), marketWithCustomSymbols(customSymbols), api.portfolio(), api.manualOrders()])
-      .then(([nextHealth, nextMarket, nextPortfolio, nextManual]) => {
+    Promise.all([api.health(), marketWithCustomSymbols(customSymbols), api.portfolio(), api.manualOrders(), api.liveAccount()])
+      .then(([nextHealth, nextMarket, nextPortfolio, nextManual, nextLiveAccount]) => {
         if (!active) return
         setHealth(nextHealth)
         setMarket(nextMarket)
         setPortfolio(nextPortfolio)
         setManualOrders(nextManual)
+        setLiveAccount(nextLiveAccount)
       })
       .catch((reason) => active && setError(reason instanceof Error ? reason.message : '本地服务连接失败'))
       .finally(() => active && setLoading(false))
@@ -198,7 +202,7 @@ export function App() {
               <Watchlist quotes={market?.quotes ?? []} selected={quote?.symbol ?? selected} onSelect={setSelected} onAdd={addSymbol} />
               <MarketPanel quote={quote} candles={candles} chartLoading={chartLoading} market={market} />
               <AiAssistant quote={quote} configured={Boolean(health?.deepseek.configured)} onOpenSettings={() => setSettingsOpen(true)} />
-              <OrderTicket quote={quote} portfolio={portfolio ?? undefined} connectors={health?.connectors ?? []} broker={broker} riskConfig={health?.riskConfig} onBrokerChange={setBroker} onChanged={refreshAccount} />
+              <OrderTicket quote={quote} portfolio={portfolio ?? undefined} liveAccount={liveAccount ?? undefined} connectors={health?.connectors ?? []} broker={broker} riskConfig={health?.riskConfig} onBrokerChange={setBroker} onChanged={refreshAccount} />
               <PortfolioPanel portfolio={portfolio ?? undefined} />
             </div>
           </>
@@ -222,15 +226,17 @@ export function App() {
                 <strong>{quote?.name} {quote?.symbol}</strong>
                 <span className={changeClass(quote?.changePct ?? 0)}>{quote ? `${price(quote.price)} · ${percent(quote.changePct)}` : '--'}</span>
               </div>
-              <OrderTicket quote={quote} portfolio={portfolio ?? undefined} connectors={health?.connectors ?? []} broker={broker} riskConfig={health?.riskConfig} onBrokerChange={setBroker} onChanged={refreshAccount} />
+              <LiveAccountPanel account={liveAccount ?? undefined} onChanged={refreshAccount} />
+              <OrderTicket quote={quote} portfolio={portfolio ?? undefined} liveAccount={liveAccount ?? undefined} connectors={health?.connectors ?? []} broker={broker} riskConfig={health?.riskConfig} onBrokerChange={setBroker} onChanged={refreshAccount} />
               <ManualOrders orders={manualOrders} onChanged={refreshAccount} />
             </div>
-            <TradeReadiness health={health ?? undefined} portfolio={portfolio ?? undefined} onOpenSettings={() => setSettingsOpen(true)} />
+            <TradeReadiness health={health ?? undefined} portfolio={portfolio ?? undefined} liveAccount={liveAccount ?? undefined} onOpenSettings={() => setSettingsOpen(true)} />
           </div>
         )}
 
         {section === 'account' && (
           <div className="account-view">
+            <LiveAccountPanel account={liveAccount ?? undefined} expanded onChanged={refreshAccount} />
             <PortfolioPanel portfolio={portfolio ?? undefined} expanded onReset={() => void resetPortfolio()} />
             <ManualOrders orders={manualOrders} onChanged={refreshAccount} />
           </div>
@@ -318,11 +324,12 @@ function Metric({ label, value, tone = '' }: { label: string; value: string; ton
   return <div><span>{label}</span><strong className={tone}>{value}</strong></div>
 }
 
-function TradeReadiness({ health, portfolio, onOpenSettings }: { health?: HealthResponse; portfolio?: Portfolio; onOpenSettings: () => void }) {
+function TradeReadiness({ health, portfolio, liveAccount, onOpenSettings }: { health?: HealthResponse; portfolio?: Portfolio; liveAccount?: LiveAccountSnapshot; onOpenSettings: () => void }) {
   const gtja = health?.connectors.find((item) => item.id === 'gtja-manual')
   const checks = [
     { label: '本地风控服务', ok: Boolean(health?.localOnly), detail: '仅监听 127.0.0.1' },
     { label: '模拟盘验证', ok: Boolean(portfolio?.orders.length), detail: portfolio?.orders.length ? `已完成 ${portfolio.orders.length} 笔` : '建议先完成至少一笔' },
+    { label: '君弘账户镜像', ok: Boolean(liveAccount?.fresh), detail: liveAccount?.fresh ? '今日余额与持仓已抄录' : liveAccount?.configured ? '不是今日数据，请更新' : '建议实盘前抄录' },
     { label: '国泰海通君弘', ok: gtja?.status === 'ready', detail: gtja?.status === 'ready' ? '已检测桌面端' : '可先使用手机 APP' },
     { label: 'DeepSeek', ok: Boolean(health?.deepseek.configured), detail: health?.deepseek.configured ? '密钥已配置，调用时验证' : '不影响手动交易' },
     { label: 'API 实盘', ok: Boolean(health?.liveEnabled), detail: health?.liveEnabled ? '官方通道已解锁' : '保持锁定' },

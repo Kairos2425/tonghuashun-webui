@@ -5,7 +5,7 @@ const WATCHLIST = [
   { symbol: '159915.SZ', providerCode: 'sz159915', name: '创业板ETF', kind: '宽基 ETF', exchange: '深圳', risk: '高', priceTick: 0.001, lotSize: 100, tradable: true },
   { symbol: '600519.SH', providerCode: 'sh600519', name: '贵州茅台', kind: 'A 股', exchange: '上海', risk: '高', priceTick: 0.01, lotSize: 100, tradable: true },
   { symbol: '000001.SZ', providerCode: 'sz000001', name: '平安银行', kind: 'A 股', exchange: '深圳', risk: '高', priceTick: 0.01, lotSize: 100, tradable: true },
-]
+].map(withQuantityRules)
 
 const INDICES = [
   { symbol: '000001.SH', providerCode: 'sh000001', name: '上证指数' },
@@ -235,7 +235,7 @@ function definitionForSymbol(input) {
     || (market === 'SZ' && /^(000|001|002|003|300|301)/.test(code))
     || (market === 'BJ' && /^(4|8|920)/.test(code))
   const tradable = isFund || isAshare
-  return {
+  return withQuantityRules({
     symbol,
     providerCode: `${market.toLowerCase()}${code}`,
     name: symbol,
@@ -243,8 +243,32 @@ function definitionForSymbol(input) {
     exchange: market === 'SH' ? '上海' : market === 'SZ' ? '深圳' : '北京',
     risk: isFund ? '中高' : isAshare ? '高' : '需识别',
     priceTick: isFund ? 0.001 : 0.01,
-    lotSize: 100,
     tradable,
+  })
+}
+
+function withQuantityRules(instrument) {
+  if (!instrument?.symbol || instrument.tradable === false) return instrument
+  const [code, market] = instrument.symbol.split('.')
+  if (market === 'SH' && /^(688|689)/.test(code)) {
+    return {
+      ...instrument,
+      kind: instrument.kind === 'A 股' ? '科创板 A 股' : instrument.kind,
+      lotSize: 200,
+      quantityRule: { buyMin: 200, buyStep: 1, sellMin: 200, sellStep: 1, oddLotThreshold: 200 },
+    }
+  }
+  if (market === 'BJ') {
+    return {
+      ...instrument,
+      lotSize: 100,
+      quantityRule: { buyMin: 100, buyStep: 1, sellMin: 100, sellStep: 1, oddLotThreshold: 100 },
+    }
+  }
+  return {
+    ...instrument,
+    lotSize: 100,
+    quantityRule: { buyMin: 100, buyStep: 100, sellMin: 100, sellStep: 100, oddLotThreshold: 100 },
   }
 }
 

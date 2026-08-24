@@ -2,8 +2,8 @@ import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { spawn } from 'node:child_process'
 
-const PROTECT_SCRIPT = "$plain=[Console]::In.ReadToEnd();$bytes=[Text.Encoding]::UTF8.GetBytes($plain);$protected=[Security.Cryptography.ProtectedData]::Protect($bytes,$null,[Security.Cryptography.DataProtectionScope]::CurrentUser);[Console]::Out.Write([Convert]::ToBase64String($protected))"
-const UNPROTECT_SCRIPT = "$encoded=[Console]::In.ReadToEnd().Trim();$bytes=[Convert]::FromBase64String($encoded);$plain=[Security.Cryptography.ProtectedData]::Unprotect($bytes,$null,[Security.Cryptography.DataProtectionScope]::CurrentUser);[Console]::Out.Write([Text.Encoding]::UTF8.GetString($plain))"
+const PROTECT_SCRIPT = "Add-Type -AssemblyName System.Security;$plain=[Console]::In.ReadToEnd();$bytes=[Text.Encoding]::UTF8.GetBytes($plain);$protected=[Security.Cryptography.ProtectedData]::Protect($bytes,$null,[Security.Cryptography.DataProtectionScope]::CurrentUser);[Console]::Out.Write([Convert]::ToBase64String($protected))"
+const UNPROTECT_SCRIPT = "Add-Type -AssemblyName System.Security;$encoded=[Console]::In.ReadToEnd().Trim();$bytes=[Convert]::FromBase64String($encoded);$plain=[Security.Cryptography.ProtectedData]::Unprotect($bytes,$null,[Security.Cryptography.DataProtectionScope]::CurrentUser);[Console]::Out.Write([Text.Encoding]::UTF8.GetString($plain))"
 
 export class SecretStore {
   constructor(filePath) {
@@ -26,7 +26,7 @@ export class SecretStore {
     if (process.platform !== 'win32') return null
     try {
       const encrypted = await readFile(this.filePath, 'utf8')
-      return await runPowerShell(UNPROTECT_SCRIPT, encrypted)
+      return await unprotectText(encrypted)
     } catch (error) {
       if (error?.code === 'ENOENT') return null
       throw error
@@ -38,7 +38,7 @@ export class SecretStore {
     const key = String(value ?? '').trim()
     if (key.length < 16 || !key.startsWith('sk-')) throw new Error('DeepSeek API Key 格式不正确')
     if (process.platform !== 'win32') throw new Error('非 Windows 环境请使用 DEEPSEEK_API_KEY 环境变量')
-    const encrypted = await runPowerShell(PROTECT_SCRIPT, key)
+    const encrypted = await protectText(key)
     await mkdir(dirname(this.filePath), { recursive: true })
     await writeFile(this.filePath, encrypted, { encoding: 'utf8', mode: 0o600 })
     return this.status()
@@ -49,6 +49,16 @@ export class SecretStore {
     await rm(this.filePath, { force: true })
     return this.status()
   }
+}
+
+export function protectText(value) {
+  if (process.platform !== 'win32') throw new Error('DPAPI 仅支持 Windows')
+  return runPowerShell(PROTECT_SCRIPT, value)
+}
+
+export function unprotectText(value) {
+  if (process.platform !== 'win32') throw new Error('DPAPI 仅支持 Windows')
+  return runPowerShell(UNPROTECT_SCRIPT, value)
 }
 
 function runPowerShell(script, input) {

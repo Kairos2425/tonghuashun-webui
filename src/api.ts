@@ -1,4 +1,4 @@
-import type { AiAnalysis, CandleResponse, HealthResponse, MarketResponse, OrderPreview, OrderRecord, Portfolio, Quote } from './types'
+import type { AiAnalysis, CandleResponse, HealthResponse, LiveAccountPosition, LiveAccountSnapshot, MarketResponse, OrderPreview, OrderRecord, Portfolio, Quote } from './types'
 
 interface ErrorPayload {
   error?: string
@@ -39,6 +39,10 @@ export const api = {
   candles: (symbol: string, limit = 80) => request<CandleResponse>(`/api/market/candles?symbol=${encodeURIComponent(symbol)}&limit=${limit}`),
   portfolio: () => request<{ ok: true; portfolio: Portfolio }>('/api/portfolio').then((value) => value.portfolio),
   resetPortfolio: () => request<{ ok: true; portfolio: Portfolio }>('/api/portfolio/reset', { method: 'POST' }).then((value) => value.portfolio),
+  liveAccount: () => request<{ ok: true; account: LiveAccountSnapshot }>('/api/live-account').then((value) => value.account),
+  saveLiveAccount: (body: { cash: number; totalAssets: number; positions: LiveAccountPosition[] }) =>
+    request<{ ok: true; account: LiveAccountSnapshot }>('/api/live-account', { method: 'PUT', body: JSON.stringify(body) }).then((value) => value.account),
+  clearLiveAccount: () => request<{ ok: true; account: LiveAccountSnapshot }>('/api/live-account', { method: 'DELETE' }).then((value) => value.account),
   previewOrder: (body: { symbol: string; side: string; price: number; quantity: number; broker: string }) =>
     request<{ ok: true; preview: OrderPreview }>('/api/orders/preview', { method: 'POST', body: JSON.stringify(body) }).then((value) => value.preview),
   submitOrder: (previewId: string, confirmationText: string) =>

@@ -16,7 +16,7 @@
     "build": "tsc -p tsconfig.json && vite build",
     "preview": "vite preview",
     "typecheck": "tsc -p tsconfig.json",
-    "test": "node --test tests/risk.test.mjs tests/market-core.test.mjs tests/paper-broker.test.mjs tests/manual-orders.test.mjs tests/connectors.test.mjs tests/secrets.test.mjs tests/api.test.mjs",
+    "test": "node --test tests/risk.test.mjs tests/market-core.test.mjs tests/paper-broker.test.mjs tests/manual-orders.test.mjs tests/live-account.test.mjs tests/connectors.test.mjs tests/secrets.test.mjs tests/api.test.mjs",
     "verify": "npm run typecheck && npm test && npm run build"
   },
   "dependencies": {
