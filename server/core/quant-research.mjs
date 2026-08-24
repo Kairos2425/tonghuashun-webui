@@ -150,6 +150,7 @@ export function runCrossSectionalBacktest(universe, options = {}) {
     maxWeight: numberInRange(options.maxWeight, 0.1, 0.4, 0.3),
     maxOrderValue: numberInRange(options.maxOrderValue, 100, 1_000_000, 1_000),
     slippageBps: numberInRange(options.slippageBps, 0, 100, 5),
+    costMultiplier: numberInRange(options.costMultiplier, 1, 3, 1),
   }
   const assets = normalizeUniverse(universe, options.now)
   if (assets.length < 4) throw withStatus('横截面模型至少需要 4 个有效 ETF', 400)
@@ -303,10 +304,11 @@ function simulateCrossSectional(predictions, config, assets) {
         const sample = prices.get(symbol)
         const executionPrice = sample.nextOpen * (1 - config.slippageBps / 10_000)
         const fees = estimateFees({ side: 'SELL', price: executionPrice, quantity })
-        const credit = executionPrice * quantity - fees.total
+        const chargedFees = fees.total * config.costMultiplier
+        const credit = executionPrice * quantity - chargedFees
         cash += credit
         holdings.delete(symbol)
-        totalCosts += fees.total + (sample.nextOpen - executionPrice) * quantity
+        totalCosts += chargedFees + (sample.nextOpen - executionPrice) * quantity
         totalNotional += executionPrice * quantity
         actions.push({ side: 'SELL', symbol, quantity, price: round(executionPrice, 4) })
       }
@@ -319,11 +321,12 @@ function simulateCrossSectional(predictions, config, assets) {
         const quantity = affordableQuantity(budget, executionPrice, sample.quantityRule)
         if (quantity <= 0) continue
         const fees = estimateFees({ side: 'BUY', price: executionPrice, quantity })
-        const debit = executionPrice * quantity + fees.total
+        const chargedFees = fees.total * config.costMultiplier
+        const debit = executionPrice * quantity + chargedFees
         if (debit > cash) continue
         cash -= debit
         holdings.set(sample.symbol, quantity)
-        totalCosts += fees.total + (executionPrice - sample.nextOpen) * quantity
+        totalCosts += chargedFees + (executionPrice - sample.nextOpen) * quantity
         totalNotional += executionPrice * quantity
         actions.push({ side: 'BUY', symbol: sample.symbol, quantity, price: round(executionPrice, 4) })
       }
@@ -361,6 +364,91 @@ function simulateCrossSectional(predictions, config, assets) {
       currentPositions: holdings.size,
     },
   }
+}
+
+export function runCrossSectionalRobustness(universe, options = {}) {
+  const fixedScenarios = [
+    { id: 'base', label: '基准：55%门槛/5日换仓', parameters: { selectionThreshold: 0.55, rebalanceEvery: 5, slippageBps: 5, costMultiplier: 1, maxOrderValue: 1_000 } },
+    { id: 'threshold_52', label: '较弱门槛：52%', parameters: { selectionThreshold: 0.52, rebalanceEvery: 5, slippageBps: 5, costMultiplier: 1, maxOrderValue: 1_000 } },
+    { id: 'threshold_58', label: '更严门槛：58%', parameters: { selectionThreshold: 0.58, rebalanceEvery: 5, slippageBps: 5, costMultiplier: 1, maxOrderValue: 1_000 } },
+    { id: 'rebalance_10', label: '低频：10日换仓', parameters: { selectionThreshold: 0.55, rebalanceEvery: 10, slippageBps: 5, costMultiplier: 1, maxOrderValue: 1_000 } },
+    { id: 'slippage_15', label: '滑点压力：15基点', parameters: { selectionThreshold: 0.55, rebalanceEvery: 5, slippageBps: 15, costMultiplier: 1, maxOrderValue: 1_000 } },
+    { id: 'fees_2x', label: '费用压力：佣金规费2倍', parameters: { selectionThreshold: 0.55, rebalanceEvery: 5, slippageBps: 5, costMultiplier: 2, maxOrderValue: 1_000 } },
+    { id: 'order_500', label: '更小资金：单笔500元', parameters: { selectionThreshold: 0.55, rebalanceEvery: 5, slippageBps: 5, costMultiplier: 1, maxOrderValue: 500 } },
+  ]
+  const scenarios = fixedScenarios.map((scenario) => {
+    const result = runCrossSectionalBacktest(universe, { ...options, ...scenario.parameters })
+    return { id: scenario.id, label: scenario.label, parameters: scenario.parameters, metrics: result.metrics }
+  })
+  const base = runCrossSectionalBacktest(universe, { ...options, ...fixedScenarios[0].parameters })
+  const regimes = splitEquityRegimes(base.equityCurve, 3)
+  const positiveScenarios = scenarios.filter((scenario) => scenario.metrics.excessReturnPct > 0).length
+  const positiveRegimes = regimes.filter((regime) => regime.excessReturnPct > 0).length
+  const worstRegimeExcess = Math.min(...regimes.map((regime) => regime.excessReturnPct))
+  const costStress = scenarios.find((scenario) => scenario.id === 'fees_2x')
+  const checks = [
+    { id: 'base_excess', pass: base.metrics.excessReturnPct > 0, label: '基准样本外超额收益为正' },
+    { id: 'scenario_majority', pass: positiveScenarios >= Math.ceil(scenarios.length * 0.6), label: '至少 60% 固定压力场景超额为正' },
+    { id: 'regime_consistency', pass: positiveRegimes >= 2, label: '三个时间段中至少两个超额为正' },
+    { id: 'regime_tail', pass: worstRegimeExcess >= -10, label: '任一时间段超额不低于 -10%' },
+    { id: 'cost_survival', pass: Boolean(costStress?.metrics.excessReturnPct > 0), label: '费用翻倍后超额仍为正' },
+    { id: 'drawdown', pass: Math.max(...scenarios.map((scenario) => scenario.metrics.maxDrawdownPct)) <= 10, label: '所有场景最大回撤不超过 10%' },
+    { id: 'turnover', pass: base.metrics.turnoverPct <= 200, label: '基准年化外推前换手不超过 200%' },
+  ]
+  const failed = checks.filter((check) => !check.pass).length
+  const criticalFailure = !checks.find((check) => check.id === 'base_excess')?.pass || !checks.find((check) => check.id === 'regime_tail')?.pass
+  const verdict = failed === 0 ? 'SHADOW_ONLY' : criticalFailure ? 'REJECTED' : 'FRAGILE'
+  return {
+    modelId: base.model.id,
+    generatedAt: new Date().toISOString(),
+    knownTrialCount: scenarios.length + 2,
+    selectionBiasNotice: '本项目此前已观察 50% 与 55% 门槛结果，当前验证不再是完全独立的首次检验。',
+    verdict,
+    checks,
+    summary: {
+      scenarios: scenarios.length,
+      positiveScenarios,
+      positiveScenarioPct: round((positiveScenarios / scenarios.length) * 100, 2),
+      positiveRegimes,
+      worstRegimeExcessPct: round(worstRegimeExcess, 2),
+      medianExcessReturnPct: round(median(scenarios.map((scenario) => scenario.metrics.excessReturnPct)), 2),
+      worstExcessReturnPct: round(Math.min(...scenarios.map((scenario) => scenario.metrics.excessReturnPct)), 2),
+      worstDrawdownPct: round(Math.max(...scenarios.map((scenario) => scenario.metrics.maxDrawdownPct)), 2),
+      baseTurnoverPct: base.metrics.turnoverPct,
+    },
+    scenarios,
+    regimes,
+    base: { metrics: base.metrics, current: base.current, model: base.model },
+    warnings: [
+      '场景集合在运行前固定，界面不会自动挑选收益最高的参数。',
+      '本审计不能消除模型选择偏差；真正独立的证据只能来自未来影子数据或冻结后的新时间段。',
+      '即使全部检查通过，结论仍只允许进入影子观察，不自动升级为模拟或实盘交易。',
+    ],
+  }
+}
+
+function splitEquityRegimes(curve, count) {
+  const regimes = []
+  for (let index = 0; index < count; index += 1) {
+    const start = Math.floor(index * curve.length / count)
+    const end = Math.floor((index + 1) * curve.length / count)
+    const slice = curve.slice(start, end)
+    if (slice.length < 2) continue
+    const first = slice[0]
+    const last = slice.at(-1)
+    const portfolioReturn = last.equity / first.equity - 1
+    const benchmarkReturn = last.benchmark / first.benchmark - 1
+    regimes.push({
+      id: `regime_${index + 1}`,
+      start: first.date,
+      end: last.date,
+      totalReturnPct: round(portfolioReturn * 100, 2),
+      benchmarkReturnPct: round(benchmarkReturn * 100, 2),
+      excessReturnPct: round((portfolioReturn - benchmarkReturn) * 100, 2),
+      maxDrawdownPct: round(maxDrawdown(slice.map((point) => point.equity)) * 100, 2),
+    })
+  }
+  return regimes
 }
 
 function commonLatestFeatureDate(assets) {

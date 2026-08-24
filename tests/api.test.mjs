@@ -245,6 +245,17 @@ test('横截面研究与影子组合不会生成交易订单', async (t) => {
   })
   assert.equal(research.status, 503)
 
+  const registryBefore = await fetch(`${baseUrl}/api/quant/experiments`).then((response) => response.json())
+  assert.equal(registryBefore.experiments.length, 0)
+  const robustness = await fetch(`${baseUrl}/api/quant/robustness`, {
+    method: 'POST',
+    headers: mutationHeaders(),
+    body: JSON.stringify({ symbols: universe.universe.map((item) => item.symbol) }),
+  })
+  assert.equal(robustness.status, 503)
+  const registryAfter = await fetch(`${baseUrl}/api/quant/experiments`).then((response) => response.json())
+  assert.equal(registryAfter.experiments.length, 0)
+
   const capture = await fetch(`${baseUrl}/api/quant/shadow/capture`, { method: 'POST', headers: mutationHeaders() })
   assert.equal(capture.status, 503)
 

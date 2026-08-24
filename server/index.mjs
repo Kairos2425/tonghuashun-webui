@@ -1,4 +1,5 @@
 import { createServer } from 'node:http'
+import { createHash } from 'node:crypto'
 import { readFile, stat } from 'node:fs/promises'
 import { extname, isAbsolute, join, normalize, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -11,9 +12,10 @@ import { createOrderPreview, DEFAULT_RISK_CONFIG, estimateFees, validateOrder } 
 import { analyzeWithDeepSeek } from './core/deepseek.mjs'
 import { connectorStatuses, launchGtjaClient, submitOfficialOrder } from './core/connectors.mjs'
 import { loadLocalEnv } from './core/env.mjs'
-import { analyzeRelativeValue, runCrossSectionalBacktest, runMlBacktest } from './core/quant-research.mjs'
+import { analyzeRelativeValue, onlyCompletedDailyCandles, runCrossSectionalBacktest, runCrossSectionalRobustness, runMlBacktest } from './core/quant-research.mjs'
 import { StrategyAutomationStore } from './core/strategy-automation.mjs'
-import { DEFAULT_ETF_UNIVERSE, ShadowPortfolioStore, validateUniverse } from './core/shadow-portfolio.mjs'
+import { calculateShadowOutcome, DEFAULT_ETF_UNIVERSE, ShadowPortfolioStore, validateUniverse } from './core/shadow-portfolio.mjs'
+import { ExperimentRegistryStore } from './core/experiment-registry.mjs'
 
 const serverDir = fileURLToPath(new URL('.', import.meta.url))
 const rootDir = resolve(serverDir, '..')
@@ -34,6 +36,7 @@ const manualOrders = new ManualOrderStore(join(dataDir, 'manual-orders.json'), j
 const liveAccount = new LiveAccountStore(join(dataDir, 'live-account.dpapi'))
 const strategyAutomation = new StrategyAutomationStore(join(dataDir, 'strategy-automation.json'))
 const shadowPortfolio = new ShadowPortfolioStore(join(dataDir, 'quant-shadow.json'))
+const experimentRegistry = new ExperimentRegistryStore(join(dataDir, 'quant-experiments.json'))
 const secrets = new SecretStore(join(dataDir, 'deepseek-key.dpapi'))
 const previews = new Map()
 let automationRunPromise = null
@@ -300,7 +303,39 @@ async function handleApi(request, response, url) {
       outOfSampleDates: research.result.model.outOfSampleDates,
       rebalanceCount: research.result.metrics.rebalanceCount,
     })
-    return sendJson(response, 200, { ok: true, source: '腾讯公开行情', ...research })
+    return sendJson(response, 200, { ok: true, source: '腾讯公开行情', symbols: research.symbols, result: research.result })
+  }
+
+  if (request.method === 'POST' && url.pathname === '/api/quant/robustness') {
+    const body = await readJsonBody(request)
+    const research = await loadCrossSectionalResearch(body.symbols, body)
+    const robustness = runCrossSectionalRobustness(research.datasets, {
+      topK: body.topK,
+      maxWeight: body.maxWeight,
+    })
+    const saved = await experimentRegistry.record({
+      modelId: robustness.modelId,
+      dataFingerprint: fingerprintDatasets(research.datasets),
+      universe: research.symbols,
+      signalDate: robustness.base.current.date,
+      verdict: robustness.verdict,
+      knownTrialCount: robustness.knownTrialCount,
+      selectionBiasNotice: robustness.selectionBiasNotice,
+      summary: robustness.summary,
+      checks: robustness.checks,
+      baseMetrics: robustness.base.metrics,
+    })
+    await manualOrders.audit('quant_robustness_experiment_recorded', {
+      experimentId: saved.experiment.id,
+      verdict: saved.experiment.verdict,
+      knownTrialCount: saved.experiment.knownTrialCount,
+      dataFingerprint: saved.experiment.dataFingerprint,
+    })
+    return sendJson(response, 200, { ok: true, source: '腾讯公开行情', robustness, experiment: saved.experiment, registryCount: saved.registry.experiments.length })
+  }
+
+  if (request.method === 'GET' && url.pathname === '/api/quant/experiments') {
+    return sendJson(response, 200, { ok: true, ...(await experimentRegistry.get()) })
   }
 
   if (request.method === 'GET' && url.pathname === '/api/quant/shadow') {
@@ -678,6 +713,7 @@ async function loadCrossSectionalResearch(inputSymbols, options = {}) {
   }
   return {
     symbols,
+    datasets,
     result: runCrossSectionalBacktest(datasets, {
       topK: options.topK,
       rebalanceEvery: options.rebalanceEvery,
@@ -689,13 +725,17 @@ async function loadCrossSectionalResearch(inputSymbols, options = {}) {
 }
 
 async function captureShadowPortfolio({ force = false } = {}) {
-  const state = await shadowPortfolio.get()
+  let state = await shadowPortfolio.get()
   if (!state.enabled && !force) return { status: 'disabled', message: '影子组合未启用' }
   const window = shadowCaptureWindow()
   if (!window.open && !force) return { status: 'sleeping', message: window.message }
   const research = await loadCrossSectionalResearch(state.universe)
   if (state.lastSnapshot?.date === research.result.current.date) {
     return { status: 'already_captured', message: '该信号日期已有影子快照', snapshot: state.lastSnapshot }
+  }
+  if (state.lastSnapshot && !state.lastSnapshot.outcome) {
+    const outcome = calculateShadowOutcome(state.lastSnapshot, research.datasets, research.result.current.date)
+    if (outcome) state = await shadowPortfolio.settle(state.lastSnapshot.date, outcome)
   }
   const snapshot = {
     status: 'captured',
@@ -722,6 +762,15 @@ async function captureShadowPortfolio({ force = false } = {}) {
   })
   return snapshot
 }
+
+function fingerprintDatasets(datasets) {
+  const payload = datasets.map((dataset) => ({
+    symbol: dataset.symbol,
+    candles: onlyCompletedDailyCandles(dataset.candles).map((row) => [row.date, row.open, row.close, row.high, row.low, row.volume]),
+  }))
+  return `sha256:${createHash('sha256').update(JSON.stringify(payload)).digest('hex')}`
+}
+
 
 function shadowCaptureWindow(now = new Date()) {
   const parts = new Intl.DateTimeFormat('en-US', {

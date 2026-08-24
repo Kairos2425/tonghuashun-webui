@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { analyzeRelativeValue, FEATURE_NAMES, onlyCompletedDailyCandles, runCrossSectionalBacktest, runMlBacktest } from '../server/core/quant-research.mjs'
+import { analyzeRelativeValue, FEATURE_NAMES, onlyCompletedDailyCandles, runCrossSectionalBacktest, runCrossSectionalRobustness, runMlBacktest } from '../server/core/quant-research.mjs'
 
 function candles(count = 360, variant = 0) {
   const rows = []
@@ -93,4 +93,20 @@ test('横截面模型按相对收益训练并生成受限目标组合', () => {
   assert.ok(result.current.cashWeight >= 0.1)
   assert.ok(Number.isFinite(result.metrics.excessReturnPct))
   assert.ok(result.rebalances.length > 0)
+})
+
+test('稳健性审计登记所有固定场景而不是只返回最好结果', () => {
+  const universe = Array.from({ length: 6 }, (_, index) => ({
+    symbol: `51030${index}.SH`,
+    name: `ETF-${index}`,
+    candles: candles(260, index * 0.29),
+    quantityRule: { buyMin: 100, buyStep: 100 },
+  }))
+  const result = runCrossSectionalRobustness(universe)
+  assert.equal(result.scenarios.length, 7)
+  assert.equal(result.knownTrialCount, 9)
+  assert.equal(result.regimes.length, 3)
+  assert.equal(result.checks.length, 7)
+  assert.match(result.verdict, /SHADOW_ONLY|FRAGILE|REJECTED/)
+  assert.equal(result.scenarios.some((scenario) => scenario.id === 'fees_2x'), true)
 })

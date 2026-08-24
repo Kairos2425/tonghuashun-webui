@@ -2,7 +2,7 @@ import { BrainCircuit, ChartNoAxesCombined, FlaskConical, LoaderCircle, Pause, P
 import { useEffect, useMemo, useState } from 'react'
 import { api } from '../api'
 import { money, price, sideLabel } from '../format'
-import type { CrossSectionalResult, QuantAutomation, QuantBacktestResult, Quote, RelativeValueResult, ShadowPortfolio } from '../types'
+import type { CrossSectionalResult, QuantAutomation, QuantBacktestResult, QuantExperiment, Quote, RelativeValueResult, RobustnessResult, ShadowPortfolio } from '../types'
 
 interface Props {
   quote?: Quote
@@ -29,17 +29,21 @@ export function QuantLab({ quote, onPaperChanged }: Props) {
   const [crossBusy, setCrossBusy] = useState(false)
   const [shadow, setShadow] = useState<ShadowPortfolio | null>(null)
   const [shadowBusy, setShadowBusy] = useState(false)
+  const [robustness, setRobustness] = useState<RobustnessResult | null>(null)
+  const [experiments, setExperiments] = useState<QuantExperiment[]>([])
+  const [robustnessBusy, setRobustnessBusy] = useState(false)
   const [error, setError] = useState('')
 
   useEffect(() => {
     let active = true
-    Promise.all([api.quantAutomation(), api.quantUniverse(), api.shadowPortfolio()])
-      .then(([value, universe, shadowValue]) => {
+    Promise.all([api.quantAutomation(), api.quantUniverse(), api.shadowPortfolio(), api.quantExperiments()])
+      .then(([value, universe, shadowValue, registry]) => {
         if (!active) return
         setAutomation(value.automation)
         setUniverseOptions(universe)
         setSelectedUniverse(shadowValue.shadow.universe.length ? shadowValue.shadow.universe : universe.map((item) => item.symbol))
         setShadow(shadowValue.shadow)
+        setExperiments(registry.experiments)
         setBuyThreshold(value.automation.buyThreshold)
         setSellThreshold(value.automation.sellThreshold)
         setMaxOrderValue(value.automation.maxOrderValue)
@@ -150,6 +154,20 @@ export function QuantLab({ quote, onPaperChanged }: Props) {
     setSelectedUniverse((current) => current.includes(target) ? current.filter((symbolItem) => symbolItem !== target) : [...current, target])
   }
 
+  const runRobustness = async () => {
+    setRobustnessBusy(true)
+    setError('')
+    try {
+      const response = await api.quantRobustness({ symbols: selectedUniverse, topK: 3, maxWeight: 0.3 })
+      setRobustness(response.robustness)
+      setExperiments((current) => [response.experiment, ...current].slice(0, 50))
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '模型稳健性审计失败')
+    } finally {
+      setRobustnessBusy(false)
+    }
+  }
+
   return (
     <div className="quant-view">
       <section className="panel quant-principles">
@@ -191,6 +209,15 @@ export function QuantLab({ quote, onPaperChanged }: Props) {
           <ShadowStatus shadow={shadow} />
         </aside>
       </div>
+
+      <section className="panel robustness-panel">
+        <div className="panel-heading"><div><span className="eyebrow">模型治理</span><h2>固定场景稳健性审计与实验登记</h2></div><span className={`verdict-badge ${robustness?.verdict.toLowerCase() ?? ''}`}>{robustness ? verdictLabel(robustness.verdict) : '尚未审计'}</span></div>
+        <div className="robustness-intro">
+          <span><ShieldAlert size={15} />一次运行固定登记 7 个场景和至少 9 次已知试验，不自动挑选最好参数。</span>
+          <button className="button secondary" type="button" disabled={robustnessBusy || selectedUniverse.length < 4} onClick={() => void runRobustness()}>{robustnessBusy ? <LoaderCircle className="spin" size={15} /> : <FlaskConical size={15} />}运行并登记审计</button>
+        </div>
+        {robustness ? <RobustnessView result={robustness} experiments={experiments} /> : <ExperimentRegistry experiments={experiments} />}
+      </section>
 
       <div className="quant-grid">
         <section className="panel quant-backtest-panel">
@@ -236,6 +263,55 @@ export function QuantLab({ quote, onPaperChanged }: Props) {
           </section>
         </aside>
       </div>
+    </div>
+  )
+}
+
+function RobustnessView({ result, experiments }: { result: RobustnessResult; experiments: QuantExperiment[] }) {
+  return (
+    <div className="robustness-result">
+      <div className="robust-summary">
+        <Metric label="固定场景" value={String(result.summary.scenarios)} />
+        <Metric label="正超额场景" value={`${result.summary.positiveScenarios} / ${result.summary.scenarios}`} />
+        <Metric label="中位超额" value={`${signed(result.summary.medianExcessReturnPct)}%`} tone={result.summary.medianExcessReturnPct >= 0 ? 'is-up' : 'is-down'} />
+        <Metric label="最差超额" value={`${signed(result.summary.worstExcessReturnPct)}%`} tone="is-down" />
+        <Metric label="最差回撤" value={`-${result.summary.worstDrawdownPct.toFixed(2)}%`} tone="is-down" />
+        <Metric label="已知试验次数" value={String(result.knownTrialCount)} />
+      </div>
+      <div className="robust-grid">
+        <div className="robust-checks">
+          <div className="subheading">模型卡检查</div>
+          {result.checks.map((check) => <div className={check.pass ? 'pass' : 'fail'} key={check.id}><span>{check.pass ? '✓' : '×'}</span><strong>{check.label}</strong></div>)}
+          <p>{result.selectionBiasNotice}</p>
+        </div>
+        <div className="scenario-table">
+          <div className="subheading">固定压力场景</div>
+          <div className="scenario-row scenario-head"><span>场景</span><span>超额</span><span>回撤</span><span>换手</span></div>
+          {result.scenarios.map((scenario) => <div className="scenario-row" key={scenario.id}><strong>{scenario.label}</strong><span className={scenario.metrics.excessReturnPct >= 0 ? 'is-up' : 'is-down'}>{signed(scenario.metrics.excessReturnPct)}%</span><span>-{scenario.metrics.maxDrawdownPct.toFixed(2)}%</span><span>{scenario.metrics.turnoverPct.toFixed(0)}%</span></div>)}
+        </div>
+        <div className="regime-table">
+          <div className="subheading">时间分段一致性</div>
+          {result.regimes.map((regime) => <div className="regime-row" key={regime.id}><span><strong>{regime.start}</strong><small>至 {regime.end}</small></span><em className={regime.excessReturnPct >= 0 ? 'is-up' : 'is-down'}>{signed(regime.excessReturnPct)}% 超额</em></div>)}
+        </div>
+        <ExperimentRegistry experiments={experiments} compact />
+      </div>
+      <div className="backtest-warnings">{result.warnings.map((warning) => <span key={warning}><ShieldAlert size={12} />{warning}</span>)}</div>
+    </div>
+  )
+}
+
+function ExperimentRegistry({ experiments, compact = false }: { experiments: QuantExperiment[]; compact?: boolean }) {
+  return (
+    <div className={`experiment-registry${compact ? ' compact' : ''}`}>
+      <div className="subheading">实验登记簿 · {experiments.length} 条</div>
+      {experiments.slice(0, compact ? 5 : 8).map((experiment) => (
+        <div className="experiment-row" key={experiment.id}>
+          <span><strong>{new Date(experiment.createdAt).toLocaleString('zh-CN', { hour12: false })}</strong><small>{experiment.dataFingerprint.slice(0, 22)}…</small></span>
+          <em className={experiment.verdict.toLowerCase()}>{verdictLabel(experiment.verdict)}</em>
+          <b>{experiment.knownTrialCount} 次试验</b>
+        </div>
+      ))}
+      {experiments.length === 0 && <div className="empty-state compact">尚未运行稳健性审计</div>}
     </div>
   )
 }
@@ -305,10 +381,13 @@ function ShadowStatus({ shadow }: { shadow: ShadowPortfolio | null }) {
     <div className="shadow-status">
       <div><span>最近信号日</span><strong>{snapshot.date}</strong></div>
       <div><span>历史快照</span><strong>{shadow?.history.length ?? 0} 天</strong></div>
+      <div><span>已结算</span><strong>{shadow?.performance.settledSnapshots ?? 0} 天</strong></div>
+      <div><span>累计影子超额</span><strong className={(shadow?.performance.cumulativeExcessPct ?? 0) >= 0 ? 'is-up' : 'is-down'}>{signed(shadow?.performance.cumulativeExcessPct ?? 0)}%</strong></div>
       <div className="shadow-targets">
         {snapshot.targets.map((target) => <span key={target.symbol}><b>{target.symbol}</b><em>{(target.weight * 100).toFixed(1)}%</em></span>)}
         <span><b>现金</b><em>{(snapshot.cashWeight * 100).toFixed(1)}%</em></span>
       </div>
+      {snapshot.outcome && <p>最近结算至 {snapshot.outcome.toDate}：组合 {signed(snapshot.outcome.portfolioReturnPct)}%，基准 {signed(snapshot.outcome.benchmarkReturnPct)}%，超额 {signed(snapshot.outcome.excessReturnPct)}%。</p>}
       <p>影子组合从未调用模拟或实盘下单接口。</p>
     </div>
   )
@@ -407,4 +486,13 @@ function actionLabel(action?: string) {
     WINDOW_CLOSED: '仅预览，等待执行窗口',
   }
   return labels[action ?? ''] ?? action ?? '未执行'
+}
+
+function verdictLabel(verdict: string) {
+  const labels: Record<string, string> = {
+    SHADOW_ONLY: '仅限影子观察',
+    FRAGILE: '结果脆弱',
+    REJECTED: '审计不通过',
+  }
+  return labels[verdict] ?? verdict
 }

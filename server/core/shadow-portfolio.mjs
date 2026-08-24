@@ -17,6 +17,7 @@ const DEFAULT_STATE = Object.freeze({
   universe: DEFAULT_ETF_UNIVERSE.map((item) => item.symbol),
   lastSnapshot: null,
   history: [],
+  performance: emptyPerformance(),
   updatedAt: null,
 })
 
@@ -29,9 +30,10 @@ export class ShadowPortfolioStore {
   async get() {
     try {
       const value = JSON.parse(await readFile(this.filePath, 'utf8'))
-      return { ...DEFAULT_STATE, ...value }
+      const history = Array.isArray(value?.history) ? value.history : []
+      return { ...DEFAULT_STATE, ...value, history, performance: summarizePerformance(history) }
     } catch (error) {
-      if (error?.code === 'ENOENT') return { ...DEFAULT_STATE, universe: [...DEFAULT_STATE.universe], history: [] }
+      if (error?.code === 'ENOENT') return { ...DEFAULT_STATE, universe: [...DEFAULT_STATE.universe], history: [], performance: emptyPerformance() }
       throw error
     }
   }
@@ -56,9 +58,21 @@ export class ShadowPortfolioStore {
   async record(snapshot) {
     return this.mutate(async () => {
       const current = await this.get()
-      const entry = { ...snapshot, capturedAt: new Date().toISOString() }
+      const existing = current.history.find((item) => item.date === snapshot.date)
+      const entry = { ...snapshot, ...(existing?.outcome && !snapshot.outcome ? { outcome: existing.outcome } : {}), capturedAt: new Date().toISOString() }
       const history = [entry, ...current.history.filter((item) => item.date !== entry.date)].slice(0, 120)
-      const next = { ...current, lastSnapshot: entry, history, updatedAt: new Date().toISOString() }
+      const next = { ...current, lastSnapshot: entry, history, performance: summarizePerformance(history), updatedAt: new Date().toISOString() }
+      await this.save(next)
+      return next
+    })
+  }
+
+  async settle(date, outcome) {
+    return this.mutate(async () => {
+      const current = await this.get()
+      const history = current.history.map((item) => item.date === date ? { ...item, outcome } : item)
+      const lastSnapshot = current.lastSnapshot?.date === date ? { ...current.lastSnapshot, outcome } : current.lastSnapshot
+      const next = { ...current, lastSnapshot, history, performance: summarizePerformance(history), updatedAt: new Date().toISOString() }
       await this.save(next)
       return next
     })
@@ -78,6 +92,38 @@ export class ShadowPortfolioStore {
   }
 }
 
+function summarizePerformance(history) {
+  const settled = history.filter((item) => item?.outcome && Number.isFinite(Number(item.outcome.portfolioReturnPct)))
+  if (settled.length === 0) return emptyPerformance()
+  const portfolioGrowth = settled.reduce((value, item) => value * (1 + Number(item.outcome.portfolioReturnPct) / 100), 1)
+  const benchmarkGrowth = settled.reduce((value, item) => value * (1 + Number(item.outcome.benchmarkReturnPct) / 100), 1)
+  const hits = settled.filter((item) => Number(item.outcome.excessReturnPct) > 0).length
+  const averageExcess = settled.reduce((sum, item) => sum + Number(item.outcome.excessReturnPct), 0) / settled.length
+  const status = settled.length < 20
+    ? 'INSUFFICIENT'
+    : portfolioGrowth > benchmarkGrowth && hits / settled.length >= 0.5
+      ? 'HEALTHY'
+      : 'DRIFT_WARNING'
+  return {
+    settledSnapshots: settled.length,
+    cumulativeReturnPct: round((portfolioGrowth - 1) * 100, 2),
+    benchmarkReturnPct: round((benchmarkGrowth - 1) * 100, 2),
+    cumulativeExcessPct: round((portfolioGrowth - benchmarkGrowth) * 100, 2),
+    hitRatePct: round((hits / settled.length) * 100, 2),
+    averageExcessPct: round(averageExcess, 3),
+    status,
+  }
+}
+
+function emptyPerformance() {
+  return { settledSnapshots: 0, cumulativeReturnPct: 0, benchmarkReturnPct: 0, cumulativeExcessPct: 0, hitRatePct: 0, averageExcessPct: 0, status: 'INSUFFICIENT' }
+}
+
+function round(value, digits) {
+  const factor = 10 ** digits
+  return Math.round((value + Number.EPSILON) * factor) / factor
+}
+
 export function validateUniverse(input) {
   const symbols = [...new Set((Array.isArray(input) ? input : []).map(normalizeSymbol).filter(Boolean))]
   if (symbols.length < 4 || symbols.length > 10) throw withStatus('影子研究池需要 4–10 个不同的场内 ETF', 400)
@@ -86,6 +132,25 @@ export function validateUniverse(input) {
     if (!instrument?.tradable || !String(instrument.kind).includes('ETF')) throw withStatus(`${symbol} 不是工作台支持的场内 ETF`, 400)
   }
   return symbols
+}
+
+export function calculateShadowOutcome(snapshot, datasets, toDate) {
+  const returns = new Map()
+  for (const dataset of Array.isArray(datasets) ? datasets : []) {
+    const start = dataset?.candles?.find((row) => row.date === snapshot?.date)
+    const end = dataset?.candles?.find((row) => row.date === toDate)
+    if (!start || !end || Number(start.close) <= 0) return null
+    returns.set(dataset.symbol, Number(end.close) / Number(start.close) - 1)
+  }
+  if (returns.size === 0) return null
+  const portfolioReturn = (snapshot?.targets ?? []).reduce((sum, target) => sum + Number(target.weight || 0) * Number(returns.get(target.symbol) || 0), 0)
+  const benchmarkReturn = [...returns.values()].reduce((sum, value) => sum + value, 0) / returns.size
+  return {
+    toDate,
+    portfolioReturnPct: round(portfolioReturn * 100, 3),
+    benchmarkReturnPct: round(benchmarkReturn * 100, 3),
+    excessReturnPct: round((portfolioReturn - benchmarkReturn) * 100, 3),
+  }
 }
 
 function withStatus(message, statusCode) {

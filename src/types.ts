@@ -328,6 +328,7 @@ export interface CrossSectionalResult {
     maxWeight: number
     maxOrderValue: number
     slippageBps: number
+    costMultiplier: number
   }
   current: {
     date: string
@@ -365,6 +366,12 @@ export interface ShadowSnapshot {
   cashWeight: number
   ranking: CrossSectionalResult['current']['ranking']
   metrics: Pick<CrossSectionalResult['metrics'], 'totalReturnPct' | 'excessReturnPct' | 'maxDrawdownPct' | 'turnoverPct' | 'estimatedCosts'>
+  outcome?: {
+    toDate: string
+    portfolioReturnPct: number
+    benchmarkReturnPct: number
+    excessReturnPct: number
+  }
 }
 
 export interface ShadowPortfolio {
@@ -373,5 +380,53 @@ export interface ShadowPortfolio {
   universe: string[]
   lastSnapshot: ShadowSnapshot | null
   history: ShadowSnapshot[]
+  performance: {
+    settledSnapshots: number
+    cumulativeReturnPct: number
+    benchmarkReturnPct: number
+    cumulativeExcessPct: number
+    hitRatePct: number
+    averageExcessPct: number
+    status: 'INSUFFICIENT' | 'HEALTHY' | 'DRIFT_WARNING'
+  }
   updatedAt: string | null
+}
+
+export interface RobustnessResult {
+  modelId: string
+  generatedAt: string
+  knownTrialCount: number
+  selectionBiasNotice: string
+  verdict: 'SHADOW_ONLY' | 'FRAGILE' | 'REJECTED'
+  checks: Array<{ id: string; pass: boolean; label: string }>
+  summary: {
+    scenarios: number
+    positiveScenarios: number
+    positiveScenarioPct: number
+    positiveRegimes: number
+    worstRegimeExcessPct: number
+    medianExcessReturnPct: number
+    worstExcessReturnPct: number
+    worstDrawdownPct: number
+    baseTurnoverPct: number
+  }
+  scenarios: Array<{ id: string; label: string; parameters: Record<string, number>; metrics: CrossSectionalResult['metrics'] }>
+  regimes: Array<{ id: string; start: string; end: string; totalReturnPct: number; benchmarkReturnPct: number; excessReturnPct: number; maxDrawdownPct: number }>
+  base: { metrics: CrossSectionalResult['metrics']; current: CrossSectionalResult['current']; model: CrossSectionalResult['model'] }
+  warnings: string[]
+}
+
+export interface QuantExperiment {
+  id: string
+  createdAt: string
+  modelId: string
+  dataFingerprint: string
+  universe: string[]
+  signalDate: string
+  verdict: string
+  knownTrialCount: number
+  selectionBiasNotice: string
+  summary: RobustnessResult['summary']
+  checks: RobustnessResult['checks']
+  baseMetrics: CrossSectionalResult['metrics']
 }

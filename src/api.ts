@@ -1,4 +1,4 @@
-import type { AiAnalysis, CandleResponse, CrossSectionalResult, HealthResponse, LiveAccountPosition, LiveAccountSnapshot, MarketResponse, OrderPreview, OrderRecord, Portfolio, QuantAutomation, QuantAutomationEvaluation, QuantBacktestResult, Quote, RelativeValueResult, ShadowPortfolio, ShadowSnapshot } from './types'
+import type { AiAnalysis, CandleResponse, CrossSectionalResult, HealthResponse, LiveAccountPosition, LiveAccountSnapshot, MarketResponse, OrderPreview, OrderRecord, Portfolio, QuantAutomation, QuantAutomationEvaluation, QuantBacktestResult, QuantExperiment, Quote, RelativeValueResult, RobustnessResult, ShadowPortfolio, ShadowSnapshot } from './types'
 
 interface ErrorPayload {
   error?: string
@@ -69,4 +69,7 @@ export const api = {
   saveShadowPortfolio: (body: { enabled: boolean; universe: string[] }) =>
     request<{ ok: true; shadow: ShadowPortfolio; tradingLocked: boolean }>('/api/quant/shadow', { method: 'PUT', body: JSON.stringify(body) }),
   captureShadowPortfolio: () => request<{ ok: true; capture: ShadowSnapshot | { status: string; message: string }; shadow: ShadowPortfolio; tradingLocked: boolean }>('/api/quant/shadow/capture', { method: 'POST' }),
+  quantRobustness: (body: { symbols: string[]; topK: number; maxWeight: number }) =>
+    request<{ ok: true; source: string; robustness: RobustnessResult; experiment: QuantExperiment; registryCount: number }>('/api/quant/robustness', { method: 'POST', body: JSON.stringify(body) }),
+  quantExperiments: () => request<{ ok: true; version: number; experiments: QuantExperiment[] }>('/api/quant/experiments'),
 }
