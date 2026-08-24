@@ -2,7 +2,7 @@ import { BrainCircuit, ChartNoAxesCombined, FlaskConical, LoaderCircle, Pause, P
 import { useEffect, useMemo, useState } from 'react'
 import { api } from '../api'
 import { money, price, sideLabel } from '../format'
-import type { QuantAutomation, QuantBacktestResult, Quote, RelativeValueResult } from '../types'
+import type { CrossSectionalResult, QuantAutomation, QuantBacktestResult, Quote, RelativeValueResult, ShadowPortfolio } from '../types'
 
 interface Props {
   quote?: Quote
@@ -23,14 +23,23 @@ export function QuantLab({ quote, onPaperChanged }: Props) {
   const [pairBusy, setPairBusy] = useState(false)
   const [automation, setAutomation] = useState<QuantAutomation | null>(null)
   const [automationBusy, setAutomationBusy] = useState(false)
+  const [universeOptions, setUniverseOptions] = useState<Array<{ symbol: string; name: string; style: string }>>([])
+  const [selectedUniverse, setSelectedUniverse] = useState<string[]>([])
+  const [crossSectional, setCrossSectional] = useState<CrossSectionalResult | null>(null)
+  const [crossBusy, setCrossBusy] = useState(false)
+  const [shadow, setShadow] = useState<ShadowPortfolio | null>(null)
+  const [shadowBusy, setShadowBusy] = useState(false)
   const [error, setError] = useState('')
 
   useEffect(() => {
     let active = true
-    api.quantAutomation()
-      .then((value) => {
+    Promise.all([api.quantAutomation(), api.quantUniverse(), api.shadowPortfolio()])
+      .then(([value, universe, shadowValue]) => {
         if (!active) return
         setAutomation(value.automation)
+        setUniverseOptions(universe)
+        setSelectedUniverse(shadowValue.shadow.universe.length ? shadowValue.shadow.universe : universe.map((item) => item.symbol))
+        setShadow(shadowValue.shadow)
         setBuyThreshold(value.automation.buyThreshold)
         setSellThreshold(value.automation.sellThreshold)
         setMaxOrderValue(value.automation.maxOrderValue)
@@ -99,6 +108,48 @@ export function QuantLab({ quote, onPaperChanged }: Props) {
     }
   }
 
+  const runCrossSectional = async () => {
+    setCrossBusy(true)
+    setError('')
+    try {
+      const response = await api.crossSectional({ symbols: selectedUniverse, topK: 3, rebalanceEvery: 5, maxWeight: 0.3, maxOrderValue, slippageBps })
+      setCrossSectional(response.result)
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '横截面组合回测失败')
+    } finally {
+      setCrossBusy(false)
+    }
+  }
+
+  const saveShadow = async (enabled: boolean) => {
+    setShadowBusy(true)
+    setError('')
+    try {
+      setShadow((await api.saveShadowPortfolio({ enabled, universe: selectedUniverse })).shadow)
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '影子组合配置失败')
+    } finally {
+      setShadowBusy(false)
+    }
+  }
+
+  const captureShadow = async () => {
+    setShadowBusy(true)
+    setError('')
+    try {
+      const response = await api.captureShadowPortfolio()
+      setShadow(response.shadow)
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '影子组合快照失败')
+    } finally {
+      setShadowBusy(false)
+    }
+  }
+
+  const toggleUniverse = (target: string) => {
+    setSelectedUniverse((current) => current.includes(target) ? current.filter((symbolItem) => symbolItem !== target) : [...current, target])
+  }
+
   return (
     <div className="quant-view">
       <section className="panel quant-principles">
@@ -112,6 +163,34 @@ export function QuantLab({ quote, onPaperChanged }: Props) {
       </section>
 
       {error && <div className="global-error quant-error"><ShieldAlert size={16} /><span>{error}</span><button type="button" onClick={() => setError('')}>×</button></div>}
+
+      <div className="cross-workspace">
+        <section className="panel cross-sectional-panel">
+          <div className="panel-heading"><div><span className="eyebrow">多资产机器学习</span><h2>ETF 横截面选优与组合回测</h2></div><Target size={19} /></div>
+          <div className="universe-selector">
+            {universeOptions.map((item) => (
+              <button key={item.symbol} type="button" className={selectedUniverse.includes(item.symbol) ? 'selected' : ''} onClick={() => toggleUniverse(item.symbol)}>
+                <span>{selectedUniverse.includes(item.symbol) ? '✓' : '+'}</span><strong>{item.name}</strong><small>{item.symbol} · {item.style}</small>
+              </button>
+            ))}
+          </div>
+          <div className="cross-actions">
+            <span><ShieldCheck size={13} />选择 4–10 只 ETF；胜出概率低于 55% 时保持现金，最多 3 只、单只不超过 30%</span>
+            <button className="button primary" type="button" disabled={crossBusy || selectedUniverse.length < 4} onClick={() => void runCrossSectional()}>{crossBusy ? <LoaderCircle className="spin" size={15} /> : <Play size={15} />}运行组合回测</button>
+          </div>
+          {crossSectional ? <CrossSectionalResultView result={crossSectional} /> : <div className="cross-placeholder"><ChartNoAxesCombined size={24} /><span><strong>比较资产，而不是孤立预测</strong><small>模型学习下一交易日相对收益是否高于研究池中位数。</small></span></div>}
+        </section>
+
+        <aside className="panel shadow-panel">
+          <div className="panel-heading"><div><span className="eyebrow">无交易观察</span><h2>影子组合</h2></div><span className={`automation-state${shadow?.enabled ? ' enabled' : ''}`}>{shadow?.enabled ? '每日记录' : '已停止'}</span></div>
+          <div className="shadow-lock"><ShieldCheck size={16} /><span><strong>不产生任何订单</strong><small>只在本机记录模型目标权重，供至少 30 个交易日观察。</small></span></div>
+          <div className="shadow-actions">
+            <button className={`button ${shadow?.enabled ? 'ghost-danger' : 'primary'}`} type="button" disabled={shadowBusy || selectedUniverse.length < 4} onClick={() => void saveShadow(!shadow?.enabled)}>{shadowBusy ? <LoaderCircle className="spin" size={15} /> : shadow?.enabled ? <Pause size={15} /> : <Play size={15} />}{shadow?.enabled ? '停止每日记录' : '启用每日记录'}</button>
+            <button className="button secondary" type="button" disabled={shadowBusy || selectedUniverse.length < 4} onClick={() => void captureShadow()}><RefreshCw size={15} />立即记录</button>
+          </div>
+          <ShadowStatus shadow={shadow} />
+        </aside>
+      </div>
 
       <div className="quant-grid">
         <section className="panel quant-backtest-panel">
@@ -157,6 +236,80 @@ export function QuantLab({ quote, onPaperChanged }: Props) {
           </section>
         </aside>
       </div>
+    </div>
+  )
+}
+
+function CrossSectionalResultView({ result }: { result: CrossSectionalResult }) {
+  return (
+    <div className="cross-result">
+      <div className="cross-metrics">
+        <Metric label="组合收益" value={`${signed(result.metrics.totalReturnPct)}%`} tone={result.metrics.totalReturnPct >= 0 ? 'is-up' : 'is-down'} />
+        <Metric label="等权基准" value={`${signed(result.metrics.benchmarkReturnPct)}%`} />
+        <Metric label="超额收益" value={`${signed(result.metrics.excessReturnPct)}%`} tone={result.metrics.excessReturnPct >= 0 ? 'is-up' : 'is-down'} />
+        <Metric label="最大回撤" value={`-${Math.abs(result.metrics.maxDrawdownPct).toFixed(2)}%`} tone="is-down" />
+        <Metric label="排名命中率" value={`${result.metrics.rankHitRatePct.toFixed(2)}%`} />
+        <Metric label="换手率" value={`${result.metrics.turnoverPct.toFixed(2)}%`} />
+        <Metric label="估算成本" value={money(result.metrics.estimatedCosts)} />
+        <Metric label="样本外日期" value={String(result.model.outOfSampleDates)} />
+      </div>
+      <CrossEquityChart points={result.equityCurve} />
+      <div className="cross-current">
+        <div className="ranking-table">
+          <div className="subheading">{result.current.date} 横截面排名</div>
+          <div className="ranking-row ranking-head"><span>排名</span><span>ETF</span><span>相对胜出概率</span><span>状态</span></div>
+          {result.current.ranking.map((item) => (
+            <div className={`ranking-row${item.selected ? ' selected' : ''}`} key={item.symbol}>
+              <strong>#{item.rank}</strong><span><b>{item.name}</b><small>{item.symbol}</small></span><span>{(item.probability * 100).toFixed(1)}%</span><em>{item.selected ? '目标组合' : '观察'}</em>
+            </div>
+          ))}
+        </div>
+        <div className="target-allocation">
+          <div className="subheading">逆波动目标权重</div>
+          {result.current.targets.map((target) => (
+            <div className="target-row" key={target.symbol}><span><strong>{target.name}</strong><small>{target.symbol}</small></span><i><b style={{ width: `${target.weight * 100}%` }} /></i><em>{(target.weight * 100).toFixed(1)}%</em></div>
+          ))}
+          <div className="target-row cash"><span><strong>现金缓冲</strong><small>未配置资金</small></span><i><b style={{ width: `${result.current.cashWeight * 100}%` }} /></i><em>{(result.current.cashWeight * 100).toFixed(1)}%</em></div>
+          {result.current.targets.length === 0 && <div className="empty-state compact">没有 ETF 概率超过 50%，保持现金</div>}
+        </div>
+      </div>
+      <div className="backtest-warnings">{result.warnings.map((warning) => <span key={warning}><ShieldAlert size={12} />{warning}</span>)}</div>
+    </div>
+  )
+}
+
+function CrossEquityChart({ points }: { points: CrossSectionalResult['equityCurve'] }) {
+  const width = 900
+  const height = 170
+  const all = points.flatMap((item) => [item.equity, item.benchmark])
+  const minimum = Math.min(...all)
+  const maximum = Math.max(...all)
+  const range = Math.max(1, maximum - minimum)
+  const line = (field: 'equity' | 'benchmark') => points.map((item, index) => {
+    const x = points.length <= 1 ? 0 : index / (points.length - 1) * width
+    const y = height - ((item[field] - minimum) / range) * height
+    return `${x.toFixed(1)},${y.toFixed(1)}`
+  }).join(' ')
+  return (
+    <div className="equity-chart cross-chart">
+      <div><span className="strategy-line" />横截面组合 <span className="benchmark-line" />研究池等权</div>
+      <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label="横截面组合样本外权益曲线"><polyline className="benchmark" points={line('benchmark')} /><polyline className="strategy" points={line('equity')} /></svg>
+    </div>
+  )
+}
+
+function ShadowStatus({ shadow }: { shadow: ShadowPortfolio | null }) {
+  const snapshot = shadow?.lastSnapshot
+  if (!snapshot) return <div className="shadow-empty">尚无影子快照。可立即记录上一完整交易日的目标组合。</div>
+  return (
+    <div className="shadow-status">
+      <div><span>最近信号日</span><strong>{snapshot.date}</strong></div>
+      <div><span>历史快照</span><strong>{shadow?.history.length ?? 0} 天</strong></div>
+      <div className="shadow-targets">
+        {snapshot.targets.map((target) => <span key={target.symbol}><b>{target.symbol}</b><em>{(target.weight * 100).toFixed(1)}%</em></span>)}
+        <span><b>现金</b><em>{(snapshot.cashWeight * 100).toFixed(1)}%</em></span>
+      </div>
+      <p>影子组合从未调用模拟或实盘下单接口。</p>
     </div>
   )
 }

@@ -1,4 +1,4 @@
-import type { AiAnalysis, CandleResponse, HealthResponse, LiveAccountPosition, LiveAccountSnapshot, MarketResponse, OrderPreview, OrderRecord, Portfolio, QuantAutomation, QuantAutomationEvaluation, QuantBacktestResult, Quote, RelativeValueResult } from './types'
+import type { AiAnalysis, CandleResponse, CrossSectionalResult, HealthResponse, LiveAccountPosition, LiveAccountSnapshot, MarketResponse, OrderPreview, OrderRecord, Portfolio, QuantAutomation, QuantAutomationEvaluation, QuantBacktestResult, Quote, RelativeValueResult, ShadowPortfolio, ShadowSnapshot } from './types'
 
 interface ErrorPayload {
   error?: string
@@ -62,4 +62,11 @@ export const api = {
   saveQuantAutomation: (body: { enabled: boolean; mode: 'paper'; symbol: string; buyThreshold: number; sellThreshold: number; maxOrderValue: number; evaluationIntervalMinutes: number }) =>
     request<{ ok: true; automation: QuantAutomation; liveAutomationLocked: boolean }>('/api/quant/automation', { method: 'PUT', body: JSON.stringify(body) }),
   runQuantAutomation: () => request<{ ok: true; evaluation: QuantAutomationEvaluation }>('/api/quant/automation/run', { method: 'POST' }).then((value) => value.evaluation),
+  quantUniverse: () => request<{ ok: true; universe: Array<{ symbol: string; name: string; style: string }> }>('/api/quant/universe').then((value) => value.universe),
+  crossSectional: (body: { symbols: string[]; topK: number; rebalanceEvery: number; maxWeight: number; maxOrderValue: number; slippageBps: number }) =>
+    request<{ ok: true; source: string; symbols: string[]; result: CrossSectionalResult }>('/api/quant/cross-sectional', { method: 'POST', body: JSON.stringify(body) }),
+  shadowPortfolio: () => request<{ ok: true; shadow: ShadowPortfolio; tradingLocked: boolean }>('/api/quant/shadow'),
+  saveShadowPortfolio: (body: { enabled: boolean; universe: string[] }) =>
+    request<{ ok: true; shadow: ShadowPortfolio; tradingLocked: boolean }>('/api/quant/shadow', { method: 'PUT', body: JSON.stringify(body) }),
+  captureShadowPortfolio: () => request<{ ok: true; capture: ShadowSnapshot | { status: string; message: string }; shadow: ShadowPortfolio; tradingLocked: boolean }>('/api/quant/shadow/capture', { method: 'POST' }),
 }

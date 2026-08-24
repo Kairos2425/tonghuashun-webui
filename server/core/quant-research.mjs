@@ -138,6 +138,250 @@ export function analyzeRelativeValue(leftCandles, rightCandles, options = {}) {
   }
 }
 
+export function runCrossSectionalBacktest(universe, options = {}) {
+  const config = {
+    initialCapital: numberInRange(options.initialCapital, 5_000, 10_000_000, 10_000),
+    trainWindow: integerInRange(options.trainWindow, 80, 500, 180),
+    testRatio: numberInRange(options.testRatio, 0.2, 0.5, 0.3),
+    refitEvery: integerInRange(options.refitEvery, 1, 20, 5),
+    rebalanceEvery: integerInRange(options.rebalanceEvery, 2, 20, 5),
+    topK: integerInRange(options.topK, 2, 5, 3),
+    selectionThreshold: numberInRange(options.selectionThreshold, 0.5, 0.75, 0.55),
+    maxWeight: numberInRange(options.maxWeight, 0.1, 0.4, 0.3),
+    maxOrderValue: numberInRange(options.maxOrderValue, 100, 1_000_000, 1_000),
+    slippageBps: numberInRange(options.slippageBps, 0, 100, 5),
+  }
+  const assets = normalizeUniverse(universe, options.now)
+  if (assets.length < 4) throw withStatus('横截面模型至少需要 4 个有效 ETF', 400)
+  config.topK = Math.min(config.topK, assets.length - 1)
+
+  const dateGroups = buildCrossSectionalGroups(assets)
+  if (dateGroups.length < 130) throw withStatus('ETF 共同有效样本少于 130 个交易日', 400)
+  const firstTest = Math.max(80, Math.floor(dateGroups.length * (1 - config.testRatio)))
+  const predictions = []
+  let model = null
+  for (let cursor = firstTest; cursor < dateGroups.length; cursor += 1) {
+    if (!model || (cursor - firstTest) % config.refitEvery === 0) {
+      const trainingGroups = dateGroups.slice(Math.max(0, cursor - config.trainWindow), cursor)
+      model = fitLogistic(trainingGroups.flatMap((group) => group.samples))
+    }
+    const group = dateGroups[cursor]
+    const ranked = group.samples
+      .map((sample) => ({ ...sample, probability: predict(model, sample.features) }))
+      .sort((left, right) => right.probability - left.probability)
+    predictions.push({ date: group.date, executionDate: group.executionDate, ranked })
+  }
+
+  const simulation = simulateCrossSectional(predictions, config, assets)
+  const finalTraining = dateGroups.slice(Math.max(0, dateGroups.length - config.trainWindow)).flatMap((group) => group.samples)
+  const finalModel = fitLogistic(finalTraining)
+  const currentDate = commonLatestFeatureDate(assets)
+  const currentRanking = assets
+    .map((asset) => {
+      const index = asset.rows.findIndex((row) => row.date === currentDate)
+      const features = featuresAt(asset.rows, index)
+      if (!features) return null
+      return {
+        symbol: asset.symbol,
+        name: asset.name,
+        probability: round(predict(finalModel, features), 4),
+        volatility: round(features[5], 6),
+      }
+    })
+    .filter(Boolean)
+    .sort((left, right) => right.probability - left.probability)
+  const targets = targetPortfolio(currentRanking, config)
+
+  return {
+    model: {
+      id: 'cross-sectional-logistic-v1',
+      name: 'ETF 横截面走步逻辑回归',
+      purpose: '预测下一交易日相对收益是否高于研究池中位数',
+      universeSize: assets.length,
+      featureNames: FEATURE_NAMES,
+      featureWeights: FEATURE_NAMES.map((name, index) => ({ name, weight: round(finalModel.weights[index + 1] ?? 0, 4) })),
+      trainingSamples: finalTraining.length,
+      outOfSampleDates: predictions.length,
+      noLookahead: true,
+    },
+    config,
+    current: {
+      date: currentDate,
+      ranking: currentRanking.map((item, index) => ({ ...item, rank: index + 1, selected: targets.some((target) => target.symbol === item.symbol) })),
+      targets,
+      cashWeight: round(Math.max(0, 1 - targets.reduce((sum, target) => sum + target.weight, 0)), 4),
+    },
+    metrics: simulation.metrics,
+    equityCurve: simulation.equityCurve,
+    rebalances: simulation.rebalances,
+    warnings: [
+      '研究池只有少量宽基/风格 ETF，横截面样本远小于专业机构，不应据此推断稳定 Alpha。',
+      '基金跟踪误差、规模、费率、分红与流动性差异可能被模型误识别为可交易信号。',
+      '55% 置信门槛是保守设计参数；看到回测后再修改门槛会引入数据窥探，必须重新做嵌套样本外验证。',
+      '目标权重用于影子组合研究，不会自动转换为君弘真实委托。',
+    ],
+  }
+}
+
+function normalizeUniverse(universe, now) {
+  const seen = new Set()
+  return (Array.isArray(universe) ? universe : []).map((asset) => {
+    const symbol = String(asset?.symbol ?? '').trim().toUpperCase()
+    if (!symbol || seen.has(symbol)) return null
+    seen.add(symbol)
+    const rows = completedRows(normalizeCandles(asset?.candles), now)
+    if (rows.length < 130) return null
+    return {
+      symbol,
+      name: String(asset?.name ?? symbol).trim().slice(0, 40) || symbol,
+      quantityRule: asset?.quantityRule ?? { buyMin: 100, buyStep: 100 },
+      rows,
+    }
+  }).filter(Boolean)
+}
+
+function buildCrossSectionalGroups(assets) {
+  const panel = new Map()
+  for (const asset of assets) {
+    for (let index = 20; index < asset.rows.length - 1; index += 1) {
+      const features = featuresAt(asset.rows, index)
+      if (!features) continue
+      const current = asset.rows[index]
+      const next = asset.rows[index + 1]
+      const sample = {
+        symbol: asset.symbol,
+        name: asset.name,
+        date: current.date,
+        executionDate: next.date,
+        features,
+        currentClose: current.close,
+        nextOpen: next.open,
+        nextClose: next.close,
+        targetReturn: next.close / current.close - 1,
+        quantityRule: asset.quantityRule,
+      }
+      const group = panel.get(current.date) ?? []
+      group.push(sample)
+      panel.set(current.date, group)
+    }
+  }
+  return [...panel.entries()]
+    .filter(([, samples]) => samples.length === assets.length)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([date, samples]) => {
+      const center = median(samples.map((sample) => sample.targetReturn))
+      return {
+        date,
+        executionDate: samples[0].executionDate,
+        samples: samples.map((sample) => ({ ...sample, label: sample.targetReturn > center ? 1 : 0 })),
+      }
+    })
+}
+
+function simulateCrossSectional(predictions, config, assets) {
+  let cash = config.initialCapital
+  const holdings = new Map()
+  const equityCurve = []
+  const rebalances = []
+  const dailyReturns = []
+  let previousEquity = config.initialCapital
+  let totalCosts = 0
+  let totalNotional = 0
+  let selectedCorrect = 0
+  let selectedCount = 0
+  const firstPrices = new Map(predictions[0].ranked.map((item) => [item.symbol, item.currentClose]))
+
+  predictions.forEach((prediction, predictionIndex) => {
+    const prices = new Map(prediction.ranked.map((item) => [item.symbol, item]))
+    const beforeEquity = cash + [...holdings.entries()].reduce((sum, [symbol, quantity]) => sum + quantity * (prices.get(symbol)?.nextOpen ?? 0), 0)
+    if (predictionIndex % config.rebalanceEvery === 0) {
+      const selected = prediction.ranked.filter((item) => item.probability >= config.selectionThreshold).slice(0, config.topK)
+      const selectedSymbols = new Set(selected.map((item) => item.symbol))
+      const actions = []
+      for (const [symbol, quantity] of [...holdings.entries()]) {
+        if (selectedSymbols.has(symbol)) continue
+        const sample = prices.get(symbol)
+        const executionPrice = sample.nextOpen * (1 - config.slippageBps / 10_000)
+        const fees = estimateFees({ side: 'SELL', price: executionPrice, quantity })
+        const credit = executionPrice * quantity - fees.total
+        cash += credit
+        holdings.delete(symbol)
+        totalCosts += fees.total + (sample.nextOpen - executionPrice) * quantity
+        totalNotional += executionPrice * quantity
+        actions.push({ side: 'SELL', symbol, quantity, price: round(executionPrice, 4) })
+      }
+      for (const sample of selected) {
+        selectedCorrect += sample.label
+        selectedCount += 1
+        if (holdings.has(sample.symbol)) continue
+        const executionPrice = sample.nextOpen * (1 + config.slippageBps / 10_000)
+        const budget = Math.min(config.maxOrderValue, beforeEquity * config.maxWeight, cash)
+        const quantity = affordableQuantity(budget, executionPrice, sample.quantityRule)
+        if (quantity <= 0) continue
+        const fees = estimateFees({ side: 'BUY', price: executionPrice, quantity })
+        const debit = executionPrice * quantity + fees.total
+        if (debit > cash) continue
+        cash -= debit
+        holdings.set(sample.symbol, quantity)
+        totalCosts += fees.total + (executionPrice - sample.nextOpen) * quantity
+        totalNotional += executionPrice * quantity
+        actions.push({ side: 'BUY', symbol: sample.symbol, quantity, price: round(executionPrice, 4) })
+      }
+      rebalances.push({ signalDate: prediction.date, executionDate: prediction.executionDate, selected: selected.map((item) => item.symbol), actions })
+    }
+
+    const equity = cash + [...holdings.entries()].reduce((sum, [symbol, quantity]) => sum + quantity * (prices.get(symbol)?.nextClose ?? 0), 0)
+    const benchmarkRatios = prediction.ranked.map((item) => item.nextClose / firstPrices.get(item.symbol))
+    const benchmark = config.initialCapital * mean(benchmarkRatios)
+    dailyReturns.push(previousEquity > 0 ? equity / previousEquity - 1 : 0)
+    previousEquity = equity
+    equityCurve.push({ date: prediction.executionDate, equity: roundMoney(equity), benchmark: roundMoney(benchmark), positions: holdings.size })
+  })
+
+  const finalEquity = equityCurve.at(-1)?.equity ?? config.initialCapital
+  const totalReturn = finalEquity / config.initialCapital - 1
+  const benchmarkReturn = (equityCurve.at(-1)?.benchmark ?? config.initialCapital) / config.initialCapital - 1
+  const averageEquity = mean(equityCurve.map((point) => point.equity))
+  return {
+    equityCurve,
+    rebalances,
+    metrics: {
+      initialCapital: config.initialCapital,
+      finalEquity: roundMoney(finalEquity),
+      totalReturnPct: round(totalReturn * 100, 2),
+      annualizedReturnPct: round((Math.pow(Math.max(0.0001, 1 + totalReturn), 252 / Math.max(1, equityCurve.length)) - 1) * 100, 2),
+      benchmarkReturnPct: round(benchmarkReturn * 100, 2),
+      excessReturnPct: round((totalReturn - benchmarkReturn) * 100, 2),
+      maxDrawdownPct: round(maxDrawdown(equityCurve.map((point) => point.equity)) * 100, 2),
+      sharpe: round(sharpe(dailyReturns), 2),
+      rankHitRatePct: round((selectedCorrect / Math.max(1, selectedCount)) * 100, 2),
+      rebalanceCount: rebalances.length,
+      turnoverPct: round((totalNotional / Math.max(1, averageEquity)) * 100, 2),
+      estimatedCosts: roundMoney(totalCosts),
+      currentPositions: holdings.size,
+    },
+  }
+}
+
+function commonLatestFeatureDate(assets) {
+  const dateSets = assets.map((asset) => new Set(asset.rows.slice(20).map((row) => row.date)))
+  const candidates = [...dateSets[0]].filter((date) => dateSets.every((set) => set.has(date))).sort()
+  return candidates.at(-1)
+}
+
+function targetPortfolio(ranking, config) {
+  const selected = ranking.filter((item) => item.probability >= config.selectionThreshold).slice(0, config.topK)
+  if (selected.length === 0) return []
+  const inverseVolatility = selected.map((item) => 1 / Math.max(0.002, Number(item.volatility) || 0.002))
+  const total = inverseVolatility.reduce((sum, value) => sum + value, 0)
+  return selected.map((item, index) => ({
+    symbol: item.symbol,
+    name: item.name,
+    probability: item.probability,
+    weight: round(Math.min(config.maxWeight, 0.9 * inverseVolatility[index] / total), 4),
+  }))
+}
+
 function buildSamples(rows, targetThreshold) {
   const samples = []
   for (let index = 20; index < rows.length - 1; index += 1) {
@@ -411,6 +655,13 @@ function sigmoid(value) {
 
 function mean(values) {
   return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0
+}
+
+function median(values) {
+  if (values.length === 0) return 0
+  const sorted = [...values].sort((left, right) => left - right)
+  const middle = Math.floor(sorted.length / 2)
+  return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2
 }
 
 function standardDeviation(values) {

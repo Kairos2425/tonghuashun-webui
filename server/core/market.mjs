@@ -133,13 +133,13 @@ export async function getMarketSnapshot({ force = false } = {}) {
   return data
 }
 
-export async function getCandles(symbol, limit = 80) {
+export async function getCandles(symbol, limit = 80, { force = false } = {}) {
   const definition = definitionForSymbol(symbol)
   if (!definition) throw new Error('不支持的证券代码')
   const isBuiltIn = WATCHLIST.some((item) => item.symbol === definition.symbol)
   const cacheKey = `${symbol}:${limit}`
   const cached = candleCache.get(cacheKey)
-  if (cached && cached.expiresAt > Date.now()) return cached.data
+  if (!force && cached && cached.expiresAt > Date.now()) return cached.data
   if ((process.env.MARKET_DATA_PROVIDER ?? 'tencent') === 'demo') {
     if (!isBuiltIn) throw withStatus(`演示模式不为 ${definition.symbol} 生成虚假 K 线`, 503)
     const result = { symbol, source: '本地演示行情', adjusted: '演示', fetchedAt: new Date().toISOString(), warning: '演示数据', candles: generateFallbackCandles(symbol, limit) }
@@ -149,7 +149,7 @@ export async function getCandles(symbol, limit = 80) {
   try {
     const response = await fetch(`https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param=${definition.providerCode},day,,,${Math.min(520, Math.max(20, limit))},qfq`, {
       headers: { Referer: 'https://gu.qq.com/', 'User-Agent': 'Mozilla/5.0 StockWorkbench/1.0' },
-      signal: AbortSignal.timeout(5_000),
+      signal: AbortSignal.timeout(8_000),
     })
     if (!response.ok) throw new Error(`K 线服务返回 HTTP ${response.status}`)
     const payload = await response.json()

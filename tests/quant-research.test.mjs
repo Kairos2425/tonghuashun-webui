@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { analyzeRelativeValue, FEATURE_NAMES, onlyCompletedDailyCandles, runMlBacktest } from '../server/core/quant-research.mjs'
+import { analyzeRelativeValue, FEATURE_NAMES, onlyCompletedDailyCandles, runCrossSectionalBacktest, runMlBacktest } from '../server/core/quant-research.mjs'
 
 function candles(count = 360, variant = 0) {
   const rows = []
@@ -74,4 +74,23 @@ test('相对价值模型识别同类资产的显著价差但不宣称无风险�
   assert.notEqual(result.signal, 'NEUTRAL')
   assert.ok(Math.abs(result.zScore) >= 1.5)
   assert.match(result.interpretation, /不能视为无风险套利/)
+})
+
+test('横截面模型按相对收益训练并生成受限目标组合', () => {
+  const universe = Array.from({ length: 6 }, (_, index) => ({
+    symbol: `51030${index}.SH`,
+    name: `ETF-${index}`,
+    candles: candles(360, index * 0.37),
+    quantityRule: { buyMin: 100, buyStep: 100 },
+  }))
+  const result = runCrossSectionalBacktest(universe, { topK: 3, maxWeight: 0.3, maxOrderValue: 1_000 })
+  assert.equal(result.model.noLookahead, true)
+  assert.equal(result.model.universeSize, 6)
+  assert.ok(result.model.outOfSampleDates >= 80)
+  assert.equal(result.current.ranking.length, 6)
+  assert.ok(result.current.targets.length <= 3)
+  assert.equal(result.current.targets.every((target) => target.weight <= 0.3), true)
+  assert.ok(result.current.cashWeight >= 0.1)
+  assert.ok(Number.isFinite(result.metrics.excessReturnPct))
+  assert.ok(result.rebalances.length > 0)
 })

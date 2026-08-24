@@ -220,3 +220,34 @@ test('量化自动执行默认关闭、实盘硬锁定且拒绝演示数据回�
   const portfolio = await fetch(`${baseUrl}/api/portfolio`).then((response) => response.json())
   assert.equal(portfolio.portfolio.orders.length, 0)
 })
+
+test('横截面研究与影子组合不会生成交易订单', async (t) => {
+  const { baseUrl } = await startServer(t)
+  const universe = await fetch(`${baseUrl}/api/quant/universe`).then((response) => response.json())
+  assert.equal(universe.universe.length, 6)
+
+  const initial = await fetch(`${baseUrl}/api/quant/shadow`).then((response) => response.json())
+  assert.equal(initial.shadow.enabled, false)
+  assert.equal(initial.tradingLocked, true)
+
+  const configured = await fetch(`${baseUrl}/api/quant/shadow`, {
+    method: 'PUT',
+    headers: mutationHeaders(),
+    body: JSON.stringify({ enabled: true, universe: universe.universe.map((item) => item.symbol) }),
+  })
+  assert.equal(configured.status, 200)
+  assert.equal((await configured.json()).shadow.enabled, true)
+
+  const research = await fetch(`${baseUrl}/api/quant/cross-sectional`, {
+    method: 'POST',
+    headers: mutationHeaders(),
+    body: JSON.stringify({ symbols: universe.universe.map((item) => item.symbol) }),
+  })
+  assert.equal(research.status, 503)
+
+  const capture = await fetch(`${baseUrl}/api/quant/shadow/capture`, { method: 'POST', headers: mutationHeaders() })
+  assert.equal(capture.status, 503)
+
+  const portfolio = await fetch(`${baseUrl}/api/portfolio`).then((response) => response.json())
+  assert.equal(portfolio.portfolio.orders.length, 0)
+})

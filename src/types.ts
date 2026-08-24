@@ -305,3 +305,73 @@ export interface QuantAutomation {
   history: QuantAutomationEvaluation[]
   updatedAt: string | null
 }
+
+export interface CrossSectionalResult {
+  model: {
+    id: string
+    name: string
+    purpose: string
+    universeSize: number
+    featureNames: string[]
+    featureWeights: Array<{ name: string; weight: number }>
+    trainingSamples: number
+    outOfSampleDates: number
+    noLookahead: boolean
+  }
+  config: {
+    initialCapital: number
+    trainWindow: number
+    testRatio: number
+    rebalanceEvery: number
+    topK: number
+    selectionThreshold: number
+    maxWeight: number
+    maxOrderValue: number
+    slippageBps: number
+  }
+  current: {
+    date: string
+    ranking: Array<{ symbol: string; name: string; probability: number; volatility: number; rank: number; selected: boolean }>
+    targets: Array<{ symbol: string; name: string; probability: number; weight: number }>
+    cashWeight: number
+  }
+  metrics: {
+    initialCapital: number
+    finalEquity: number
+    totalReturnPct: number
+    annualizedReturnPct: number
+    benchmarkReturnPct: number
+    excessReturnPct: number
+    maxDrawdownPct: number
+    sharpe: number
+    rankHitRatePct: number
+    rebalanceCount: number
+    turnoverPct: number
+    estimatedCosts: number
+    currentPositions: number
+  }
+  equityCurve: Array<{ date: string; equity: number; benchmark: number; positions: number }>
+  rebalances: Array<{ signalDate: string; executionDate: string; selected: string[]; actions: Array<{ side: Side; symbol: string; quantity: number; price: number }> }>
+  warnings: string[]
+}
+
+export interface ShadowSnapshot {
+  status: string
+  date: string
+  capturedAt?: string
+  modelId: string
+  universe: string[]
+  targets: Array<{ symbol: string; name: string; probability: number; weight: number }>
+  cashWeight: number
+  ranking: CrossSectionalResult['current']['ranking']
+  metrics: Pick<CrossSectionalResult['metrics'], 'totalReturnPct' | 'excessReturnPct' | 'maxDrawdownPct' | 'turnoverPct' | 'estimatedCosts'>
+}
+
+export interface ShadowPortfolio {
+  version: number
+  enabled: boolean
+  universe: string[]
+  lastSnapshot: ShadowSnapshot | null
+  history: ShadowSnapshot[]
+  updatedAt: string | null
+}

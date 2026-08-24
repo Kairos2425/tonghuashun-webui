@@ -11,8 +11,9 @@ import { createOrderPreview, DEFAULT_RISK_CONFIG, estimateFees, validateOrder } 
 import { analyzeWithDeepSeek } from './core/deepseek.mjs'
 import { connectorStatuses, launchGtjaClient, submitOfficialOrder } from './core/connectors.mjs'
 import { loadLocalEnv } from './core/env.mjs'
-import { analyzeRelativeValue, runMlBacktest } from './core/quant-research.mjs'
+import { analyzeRelativeValue, runCrossSectionalBacktest, runMlBacktest } from './core/quant-research.mjs'
 import { StrategyAutomationStore } from './core/strategy-automation.mjs'
+import { DEFAULT_ETF_UNIVERSE, ShadowPortfolioStore, validateUniverse } from './core/shadow-portfolio.mjs'
 
 const serverDir = fileURLToPath(new URL('.', import.meta.url))
 const rootDir = resolve(serverDir, '..')
@@ -32,6 +33,7 @@ const paperBroker = new PaperBroker(join(dataDir, 'paper-account.json'))
 const manualOrders = new ManualOrderStore(join(dataDir, 'manual-orders.json'), join(dataDir, 'audit.jsonl'))
 const liveAccount = new LiveAccountStore(join(dataDir, 'live-account.dpapi'))
 const strategyAutomation = new StrategyAutomationStore(join(dataDir, 'strategy-automation.json'))
+const shadowPortfolio = new ShadowPortfolioStore(join(dataDir, 'quant-shadow.json'))
 const secrets = new SecretStore(join(dataDir, 'deepseek-key.dpapi'))
 const previews = new Map()
 let automationRunPromise = null
@@ -73,6 +75,12 @@ const automationTimer = setInterval(() => {
 }, 60_000)
 automationTimer.unref()
 setTimeout(() => void runStrategyAutomation().catch(() => {}), 5_000).unref()
+
+const shadowTimer = setInterval(() => {
+  void captureShadowPortfolio().catch((error) => console.error(`[quant] 影子组合更新失败：${error?.message || error}`))
+}, 5 * 60_000)
+shadowTimer.unref()
+setTimeout(() => void captureShadowPortfolio().catch(() => {}), 8_000).unref()
 
 async function handleApi(request, response, url) {
   if (!['GET', 'HEAD'].includes(request.method || 'GET')) enforceMutationRequest(request)
@@ -277,6 +285,36 @@ async function handleApi(request, response, url) {
         threshold: url.searchParams.get('threshold'),
       }),
     })
+  }
+
+  if (request.method === 'GET' && url.pathname === '/api/quant/universe') {
+    return sendJson(response, 200, { ok: true, universe: DEFAULT_ETF_UNIVERSE })
+  }
+
+  if (request.method === 'POST' && url.pathname === '/api/quant/cross-sectional') {
+    const body = await readJsonBody(request)
+    const research = await loadCrossSectionalResearch(body.symbols, body)
+    await manualOrders.audit('quant_cross_sectional_backtest_created', {
+      universe: research.symbols,
+      model: research.result.model.id,
+      outOfSampleDates: research.result.model.outOfSampleDates,
+      rebalanceCount: research.result.metrics.rebalanceCount,
+    })
+    return sendJson(response, 200, { ok: true, source: '腾讯公开行情', ...research })
+  }
+
+  if (request.method === 'GET' && url.pathname === '/api/quant/shadow') {
+    return sendJson(response, 200, { ok: true, shadow: await shadowPortfolio.get(), tradingLocked: true })
+  }
+
+  if (request.method === 'PUT' && url.pathname === '/api/quant/shadow') {
+    const shadow = await shadowPortfolio.update(await readJsonBody(request))
+    await manualOrders.audit('quant_shadow_updated', { enabled: shadow.enabled, universe: shadow.universe })
+    return sendJson(response, 200, { ok: true, shadow, tradingLocked: true })
+  }
+
+  if (request.method === 'POST' && url.pathname === '/api/quant/shadow/capture') {
+    return sendJson(response, 200, { ok: true, capture: await captureShadowPortfolio({ force: true }), shadow: await shadowPortfolio.get(), tradingLocked: true })
   }
 
   if (request.method === 'GET' && url.pathname === '/api/quant/automation') {
@@ -619,5 +657,85 @@ function paperExecutionWindow(now = new Date()) {
     open,
     label: '交易日 09:35–09:50（北京时间）',
     message: weekdayOpen ? '当前不在模拟盘自动执行窗口，仅返回信号预览' : '周末不执行策略，仅返回信号预览',
+  }
+}
+
+async function loadCrossSectionalResearch(inputSymbols, options = {}) {
+  const symbols = validateUniverse(inputSymbols?.length ? inputSymbols : DEFAULT_ETF_UNIVERSE.map((item) => item.symbol))
+  const defaults = new Map(DEFAULT_ETF_UNIVERSE.map((item) => [item.symbol, item]))
+  const datasets = []
+  for (const symbol of symbols) {
+    const instrument = getInstrument(symbol)
+    let candles = await getCandles(symbol, 500, { force: true })
+    if (candles.source !== '腾讯公开行情') candles = await getCandles(symbol, 500, { force: true })
+    if (candles.source !== '腾讯公开行情') throw withStatus(`${symbol} 的公开历史行情不可用，拒绝使用演示数据`, 503)
+    datasets.push({
+      symbol,
+      name: defaults.get(symbol)?.name ?? instrument.name,
+      quantityRule: instrument.quantityRule,
+      candles: candles.candles,
+    })
+  }
+  return {
+    symbols,
+    result: runCrossSectionalBacktest(datasets, {
+      topK: options.topK,
+      rebalanceEvery: options.rebalanceEvery,
+      maxWeight: options.maxWeight,
+      maxOrderValue: Math.min(Number(options.maxOrderValue) || riskConfig.maxOrderValue, riskConfig.maxOrderValue),
+      slippageBps: options.slippageBps,
+    }),
+  }
+}
+
+async function captureShadowPortfolio({ force = false } = {}) {
+  const state = await shadowPortfolio.get()
+  if (!state.enabled && !force) return { status: 'disabled', message: '影子组合未启用' }
+  const window = shadowCaptureWindow()
+  if (!window.open && !force) return { status: 'sleeping', message: window.message }
+  const research = await loadCrossSectionalResearch(state.universe)
+  if (state.lastSnapshot?.date === research.result.current.date) {
+    return { status: 'already_captured', message: '该信号日期已有影子快照', snapshot: state.lastSnapshot }
+  }
+  const snapshot = {
+    status: 'captured',
+    date: research.result.current.date,
+    modelId: research.result.model.id,
+    universe: research.symbols,
+    targets: research.result.current.targets,
+    cashWeight: research.result.current.cashWeight,
+    ranking: research.result.current.ranking,
+    metrics: {
+      totalReturnPct: research.result.metrics.totalReturnPct,
+      excessReturnPct: research.result.metrics.excessReturnPct,
+      maxDrawdownPct: research.result.metrics.maxDrawdownPct,
+      turnoverPct: research.result.metrics.turnoverPct,
+      estimatedCosts: research.result.metrics.estimatedCosts,
+    },
+  }
+  await shadowPortfolio.record(snapshot)
+  await manualOrders.audit('quant_shadow_captured', {
+    date: snapshot.date,
+    modelId: snapshot.modelId,
+    universe: snapshot.universe,
+    targets: snapshot.targets.map((item) => ({ symbol: item.symbol, weight: item.weight })),
+  })
+  return snapshot
+}
+
+function shadowCaptureWindow(now = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Shanghai',
+    weekday: 'short',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(now)
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]))
+  const minutes = Number(values.hour) * 60 + Number(values.minute)
+  const weekdayOpen = !['Sat', 'Sun'].includes(values.weekday)
+  return {
+    open: weekdayOpen && minutes >= 15 * 60 + 10,
+    message: weekdayOpen ? '收盘后 15:10 才自动记录影子组合' : '周末不自动记录影子组合',
   }
 }
